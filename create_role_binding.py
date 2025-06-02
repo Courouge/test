@@ -139,18 +139,37 @@ class ConfluentRoleBindingAPI:
                 logger.error(f"Erreur lors de la récupération de l'environment ID: {e}")
                 raise
         
-        # Construction du CRN selon la documentation Confluent Cloud
+        # Construction du CRN selon la documentation Confluent Cloud officielle
+        # Format: crn://confluent.cloud/organization=*/environment={env}/cloud-cluster={cluster}/kafka={cluster}/topic={pattern}
         if resource_type == "topic":
-            crn_pattern = f"crn://confluent.cloud/organization=*/environment={environment_id}/cloud-cluster={cluster_id}/kafka={cluster_id}/topic={resource_pattern}"
+            if pattern_type == "PREFIXED":
+                # Pour les patterns avec préfixe (ex: my-project-*)
+                crn_pattern = f"crn://confluent.cloud/organization=*/environment={environment_id}/cloud-cluster={cluster_id}/kafka={cluster_id}/topic={resource_pattern}"
+            else:
+                # Pour les topics spécifiques
+                crn_pattern = f"crn://confluent.cloud/organization=*/environment={environment_id}/cloud-cluster={cluster_id}/kafka={cluster_id}/topic={resource_pattern}"
+                
         elif resource_type == "consumer-group":
-            crn_pattern = f"crn://confluent.cloud/organization=*/environment={environment_id}/cloud-cluster={cluster_id}/kafka={cluster_id}/group={resource_pattern}"
+            if pattern_type == "PREFIXED":
+                # Pour les consumer groups avec préfixe
+                crn_pattern = f"crn://confluent.cloud/organization=*/environment={environment_id}/cloud-cluster={cluster_id}/kafka={cluster_id}/group={resource_pattern}"
+            else:
+                # Pour les consumer groups spécifiques
+                crn_pattern = f"crn://confluent.cloud/organization=*/environment={environment_id}/cloud-cluster={cluster_id}/kafka={cluster_id}/group={resource_pattern}"
+                
         elif resource_type == "kafka-cluster":
+            # Permission sur le cluster entier - format simplifié
             crn_pattern = f"crn://confluent.cloud/organization=*/environment={environment_id}/cloud-cluster={cluster_id}"
+            
         else:
             raise ValueError(f"Type de ressource non supporté: {resource_type}")
         
+        # Validation du principal (doit commencer par User:)
+        if not principal.startswith('User:'):
+            principal = f"User:{principal}"
+        
         payload = {
-            "principal": f"User:{principal}",
+            "principal": principal,
             "role_name": role_name,
             "crn_pattern": crn_pattern
         }
@@ -160,8 +179,15 @@ class ConfluentRoleBindingAPI:
         response = self.session.post(url, json=payload)
         
         if response.status_code >= 400:
-            logger.error(f"Erreur {response.status_code}: {response.text}")
-            logger.error(f"Payload envoyé: {json.dumps(payload, indent=2)}")
+            # Log détaillé pour diagnostiquer l'erreur 400
+            logger.error(f"Erreur {response.status_code} lors de la création du role binding")
+            logger.error(f"URL: {url}")
+            logger.error(f"Payload: {json.dumps(payload, indent=2)}")
+            try:
+                error_detail = response.json()
+                logger.error(f"Détails de l'erreur: {json.dumps(error_detail, indent=2)}")
+            except:
+                logger.error(f"Réponse brute: {response.text}")
         
         response.raise_for_status()
         
@@ -169,7 +195,60 @@ class ConfluentRoleBindingAPI:
         logger.info(f"✅ Role binding créé: {role_binding['id']} - {role_name} sur {resource_type}:{resource_pattern}")
         return role_binding
     
-    def delete_role_binding(self, binding_id: str) -> bool:
+    def validate_role_and_resource(self, role_name: str, resource_type: str, resource_pattern: str) -> bool:
+        """Valide si un rôle et une ressource sont compatibles"""
+        
+        # Rôles valides pour chaque type de ressource
+        valid_roles = {
+            "topic": ["DeveloperRead", "DeveloperWrite", "DeveloperManage", "ResourceOwner"],
+            "consumer-group": ["DeveloperRead", "DeveloperWrite", "ResourceOwner"],
+            "kafka-cluster": ["DeveloperRead", "DeveloperWrite", "DeveloperManage", "CloudClusterAdmin", "ResourceOwner"]
+        }
+        
+        if resource_type not in valid_roles:
+            logger.error(f"Type de ressource invalide: {resource_type}")
+            return False
+        
+        if role_name not in valid_roles[resource_type]:
+            logger.error(f"Rôle {role_name} invalide pour {resource_type}")
+            logger.error(f"Rôles valides: {valid_roles[resource_type]}")
+            return False
+        
+        # Vérifier la longueur du pattern (max 249 caractères selon la doc)
+        if len(resource_pattern) > 249:
+            logger.error(f"Pattern trop long: {len(resource_pattern)} caractères (max 249)")
+            return False
+        
+        return True
+    
+    def test_api_permissions(self) -> bool:
+        """Teste les permissions de l'API Key"""
+        logger.info("🔍 Test des permissions de l'API Key...")
+        
+        try:
+            # Test de lecture des role bindings
+            response = self.session.get(f"{self.config.base_url}/iam/v2/role-bindings")
+            if response.status_code == 200:
+                logger.info("✅ Permissions de lecture OK")
+            elif response.status_code == 403:
+                logger.error("❌ Permissions insuffisantes pour lire les role bindings")
+                return False
+            else:
+                logger.warning(f"⚠️  Réponse inattendue: {response.status_code}")
+            
+            # Test de lecture des service accounts
+            response = self.session.get(f"{self.config.base_url}/iam/v2/service-accounts")
+            if response.status_code == 200:
+                logger.info("✅ Permissions service accounts OK")
+            elif response.status_code == 403:
+                logger.error("❌ Permissions insuffisantes pour lire les service accounts")
+                return False
+            
+            return True
+            
+        except Exception as e:
+            logger.error(f"Erreur lors du test des permissions: {e}")
+            return False
         """Supprime un role binding"""
         url = f"{self.config.base_url}/iam/v2/role-bindings/{binding_id}"
         response = self.session.delete(url)
@@ -194,13 +273,18 @@ class TenantRoleBindingManager:
         logger.info(f"   Service Account: {service_account_id}")
         logger.info(f"   Cluster: {cluster_id}")
         
-        # Définir les permissions à créer
+        # Test des permissions avant de commencer
+        if not self.api.test_api_permissions():
+            logger.error("❌ API Key n'a pas les permissions requises")
+            return {"successful": [], "failed": [], "skipped": []}
+        
+        # Définir les permissions à créer avec validation
         permissions = [
-            ("DeveloperRead", "topic", f"{project_name}-*"),
-            ("DeveloperWrite", "topic", f"{project_name}-*"),
-            ("DeveloperRead", "consumer-group", f"{project_name}-*"),
-            ("DeveloperWrite", "consumer-group", f"{project_name}-*"),
-            ("DeveloperRead", "kafka-cluster", cluster_id)  # Permission générale sur le cluster
+            ("DeveloperRead", "topic", f"{project_name}-*", "PREFIXED"),
+            ("DeveloperWrite", "topic", f"{project_name}-*", "PREFIXED"),
+            ("DeveloperRead", "consumer-group", f"{project_name}-*", "PREFIXED"),
+            ("DeveloperWrite", "consumer-group", f"{project_name}-*", "PREFIXED"),
+            ("DeveloperRead", "kafka-cluster", cluster_id, "LITERAL")  # Permission générale sur le cluster
         ]
         
         results = {
@@ -209,8 +293,18 @@ class TenantRoleBindingManager:
             "skipped": []
         }
         
-        for role_name, resource_type, pattern in permissions:
+        for role_name, resource_type, pattern, pattern_type in permissions:
             try:
+                # Validation avant création
+                if not self.api.validate_role_and_resource(role_name, resource_type, pattern):
+                    results["failed"].append({
+                        "role": role_name,
+                        "resource_type": resource_type,
+                        "pattern": pattern,
+                        "error": "Validation échouée"
+                    })
+                    continue
+                
                 # Vérifier si le role binding existe déjà
                 existing_bindings = self.api.list_role_bindings(service_account_id)
                 exists = any(
@@ -237,7 +331,7 @@ class TenantRoleBindingManager:
                     resource_pattern=pattern,
                     cluster_id=cluster_id,
                     environment_id=environment_id,
-                    pattern_type="PREFIXED" if resource_type != "kafka-cluster" else "LITERAL"
+                    pattern_type=pattern_type
                 )
                 
                 results["successful"].append({
@@ -250,8 +344,13 @@ class TenantRoleBindingManager:
             except requests.exceptions.HTTPError as e:
                 error_msg = f"HTTP {e.response.status_code}"
                 try:
-                    error_detail = e.response.json().get('detail', e.response.text)
-                    error_msg += f": {error_detail}"
+                    error_detail = e.response.json()
+                    if 'errors' in error_detail:
+                        error_msg += f": {error_detail['errors'][0].get('detail', error_detail)}"
+                    elif 'detail' in error_detail:
+                        error_msg += f": {error_detail['detail']}"
+                    else:
+                        error_msg += f": {error_detail}"
                 except:
                     error_msg += f": {e.response.text}"
                 
@@ -385,6 +484,11 @@ Exemples d'utilisation:
     delete_parser.add_argument('--project', required=True,
                               help='Nom du projet/tenant')
     
+    # Commande test
+    test_parser = subparsers.add_parser('test', help='Tester les permissions et la configuration')
+    test_parser.add_argument('--cluster',
+                            help='ID du cluster pour tester les CRN patterns')
+    
     args = parser.parse_args()
     
     if not args.command:
@@ -425,6 +529,33 @@ Exemples d'utilisation:
                 print(f"✅ Permissions supprimées pour {args.project}")
             else:
                 print(f"❌ Erreur lors de la suppression")
+                
+        elif args.command == 'test':
+            print("🧪 Test de la configuration et des permissions\n")
+            
+            # Test des permissions de base
+            if api_client.test_api_permissions():
+                print("✅ API Key valide avec permissions suffisantes")
+            else:
+                print("❌ Problème avec les permissions de l'API Key")
+            
+            # Test spécifique au cluster si fourni
+            if args.cluster:
+                try:
+                    cluster_info = api_client.get_cluster_info(args.cluster)
+                    env_id = cluster_info.get('spec', {}).get('environment', {}).get('id')
+                    print(f"✅ Cluster {args.cluster} trouvé dans l'environment {env_id}")
+                    
+                    # Test de pattern CRN
+                    test_crn = f"crn://confluent.cloud/organization=*/environment={env_id}/cloud-cluster={args.cluster}/kafka={args.cluster}/topic=test-*"
+                    print(f"📝 Pattern CRN qui sera utilisé:")
+                    print(f"   {test_crn}")
+                    
+                except Exception as e:
+                    print(f"❌ Erreur avec le cluster {args.cluster}: {e}")
+            
+            print(f"\n💡 Pour créer des permissions:")
+            print(f"   python create_role_bindings.py create --service-account sa-xxx --project my-project --cluster lkc-xxx")
     
     except Exception as e:
         logger.error(f"Erreur: {e}")
