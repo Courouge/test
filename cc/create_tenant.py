@@ -18,7 +18,7 @@ import requests
 from requests.auth import HTTPBasicAuth
 from read_api_key_file import read_api_keys
 
-CONFLUENT_API_KEY, CONFLUENT_API_SECRET = read_api_keys("api-key-M2N4BRY7AEPUDCAK.txt")
+CONFLUENT_API_KEY, CONFLUENT_API_SECRET = read_api_keys("api-key-test.txt")
 
 # Configuration du logging
 logging.basicConfig(
