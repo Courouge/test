@@ -1,147 +1,187 @@
 import requests
 from requests.auth import HTTPBasicAuth
 import json
-import urllib.parse
 
 api_key = "VOTRE_API_KEY"
 api_secret = "VOTRE_API_SECRET"
 
-def analyze_cluster_permissions():
+def list_everything():
     base_url = "https://api.confluent.cloud"
     auth = HTTPBasicAuth(api_key, api_secret)
     headers = {'Content-Type': 'application/json'}
     
-    print("=== ANALYSE DES PERMISSIONS PAR CLUSTER ===\n")
+    print("=== INVENTAIRE COMPLET CONFLUENT CLOUD ===\n")
     
-    # 1. Récupérer tous les role bindings d'abord
-    print("1. Récupération de tous les role bindings...")
+    # 1. Service Accounts
+    print("1. 🤖 SERVICE ACCOUNTS")
+    print("-" * 50)
+    
+    response = requests.get(f"{base_url}/iam/v2/service-accounts", auth=auth, headers=headers)
+    
+    print(f"Status: {response.status_code}")
+    if response.status_code == 200:
+        try:
+            data = response.json()
+            service_accounts = data.get('data', [])
+            print(f"Nombre de Service Accounts: {len(service_accounts)}\n")
+            
+            if service_accounts:
+                for sa in service_accounts:
+                    sa_id = sa.get('id', 'N/A')
+                    sa_name = sa.get('display_name', 'Sans nom')
+                    sa_desc = sa.get('description', 'Pas de description')
+                    print(f"📋 {sa_name}")
+                    print(f"   ID: {sa_id}")
+                    print(f"   Description: {sa_desc}")
+                    print()
+            else:
+                print("Aucun Service Account trouvé")
+                
+        except Exception as e:
+            print(f"Erreur parsing: {e}")
+            print(f"Réponse brute: {response.text[:500]}...")
+    else:
+        print(f"Erreur: {response.text[:300]}...")
+    
+    print("\n" + "="*60 + "\n")
+    
+    # 2. API Keys
+    print("2. 🔑 API KEYS")
+    print("-" * 50)
+    
+    response = requests.get(f"{base_url}/iam/v2/api-keys", auth=auth, headers=headers)
+    
+    print(f"Status: {response.status_code}")
+    if response.status_code == 200:
+        try:
+            data = response.json()
+            api_keys = data.get('data', [])
+            print(f"Nombre d'API Keys: {len(api_keys)}\n")
+            
+            if api_keys:
+                for key in api_keys:
+                    key_id = key.get('id', 'N/A')
+                    key_desc = key.get('description', 'Pas de description')
+                    owner = key.get('owner', {})
+                    owner_id = owner.get('id', 'N/A') if owner else 'N/A'
+                    spec = key.get('spec', {})
+                    resource = spec.get('resource', {}) if spec else {}
+                    resource_id = resource.get('id', 'N/A') if resource else 'N/A'
+                    
+                    print(f"🔐 API Key: {key_id}")
+                    print(f"   Description: {key_desc}")
+                    print(f"   Owner: {owner_id}")
+                    print(f"   Resource: {resource_id}")
+                    print()
+            else:
+                print("Aucune API Key trouvée")
+                
+        except Exception as e:
+            print(f"Erreur parsing: {e}")
+            print(f"Réponse brute: {response.text[:500]}...")
+    else:
+        print(f"Erreur: {response.text[:300]}...")
+    
+    print("\n" + "="*60 + "\n")
+    
+    # 3. Utilisateurs
+    print("3. 👥 UTILISATEURS")
+    print("-" * 50)
+    
+    response = requests.get(f"{base_url}/iam/v2/users", auth=auth, headers=headers)
+    
+    print(f"Status: {response.status_code}")
+    if response.status_code == 200:
+        try:
+            data = response.json()
+            users = data.get('data', [])
+            print(f"Nombre d'utilisateurs: {len(users)}\n")
+            
+            if users:
+                for user in users:
+                    user_id = user.get('id', 'N/A')
+                    user_email = user.get('email', 'Pas d\'email')
+                    user_name = user.get('full_name', 'Pas de nom')
+                    
+                    print(f"👤 {user_name}")
+                    print(f"   ID: {user_id}")
+                    print(f"   Email: {user_email}")
+                    print()
+            else:
+                print("Aucun utilisateur trouvé")
+                
+        except Exception as e:
+            print(f"Erreur parsing: {e}")
+            print(f"Réponse brute: {response.text[:500]}...")
+    else:
+        print(f"Erreur: {response.text[:300]}...")
+    
+    print("\n" + "="*60 + "\n")
+    
+    # 4. Test simple des role bindings
+    print("4. 🔒 TEST SIMPLE DES ROLE BINDINGS")
+    print("-" * 50)
+    
     response = requests.get(f"{base_url}/iam/v2/role-bindings", auth=auth, headers=headers)
     
-    all_bindings = []
+    print(f"Status: {response.status_code}")
     if response.status_code == 200:
-        data = response.json()
-        all_bindings = data.get('data', [])
-        print(f"   Total: {len(all_bindings)} role bindings trouvés\n")
-    else:
-        print(f"   Erreur: {response.status_code}")
-        return
-    
-    # 2. Récupérer tous les environnements
-    print("2. Analyse par environnement et cluster...")
-    response = requests.get(f"{base_url}/org/v2/environments", auth=auth, headers=headers)
-    
-    if response.status_code != 200:
-        print(f"Erreur lors de la récupération des environnements: {response.status_code}")
-        return
-    
-    environments = response.json().get('data', [])
-    
-    for env in environments:
-        env_id = env.get('id')
-        env_name = env.get('display_name', 'Sans nom')
-        
-        print(f"\n📁 ENVIRONNEMENT: {env_name} (ID: {env_id})")
-        print("=" * 60)
-        
-        # Role bindings au niveau environnement
-        env_bindings = [b for b in all_bindings if f"environment={env_id}" in b.get('crn_pattern', '')]
-        if env_bindings:
-            print(f"\n🔑 Role bindings au niveau environnement ({len(env_bindings)}):")
-            for binding in env_bindings:
-                principal = binding.get('principal', 'N/A')
-                role = binding.get('role_name', 'N/A')
-                crn = binding.get('crn_pattern', 'N/A')
-                print(f"   • {principal} → {role}")
-                print(f"     CRN: {crn}")
-        
-        # Clusters dans cet environnement
-        cluster_response = requests.get(
-            f"{base_url}/cmk/v2/clusters?environment={env_id}",
-            auth=auth, headers=headers
-        )
-        
-        if cluster_response.status_code == 200:
-            cluster_data = cluster_response.json()
-            clusters = cluster_data.get('data', []) if cluster_data else []
+        try:
+            data = response.json()
+            print(f"Structure de la réponse: {list(data.keys()) if data else 'Vide'}")
             
-            if clusters:
-                print(f"\n🖥️  CLUSTERS ({len(clusters)}):")
+            if 'data' in data:
+                bindings = data['data']
+                print(f"Nombre de role bindings: {len(bindings)}")
                 
-                for cluster in clusters:
-                    cluster_id = cluster.get('id', 'N/A')
-                    cluster_name = cluster.get('display_name', 'Sans nom')
-                    cluster_type = cluster.get('type', 'N/A')
+                if bindings:
+                    print("\nPremiers role bindings:")
+                    for i, binding in enumerate(bindings[:3]):  # Afficher seulement les 3 premiers
+                        print(f"\n🔗 Binding #{i+1}:")
+                        print(f"   Principal: {binding.get('principal', 'N/A')}")
+                        print(f"   Role: {binding.get('role_name', 'N/A')}")
+                        print(f"   CRN: {binding.get('crn_pattern', 'N/A')}")
                     
-                    print(f"\n   🔷 {cluster_name} (ID: {cluster_id}, Type: {cluster_type})")
-                    
-                    # Rechercher les role bindings pour ce cluster avec différentes méthodes
-                    cluster_bindings = []
-                    
-                    # Méthode 1: Recherche par ID exact dans le CRN
-                    for binding in all_bindings:
-                        crn = binding.get('crn_pattern', '')
-                        if cluster_id in crn and f"environment={env_id}" in crn:
-                            cluster_bindings.append(binding)
-                    
-                    if cluster_bindings:
-                        print(f"      🔑 Role bindings trouvés ({len(cluster_bindings)}):")
-                        for binding in cluster_bindings:
-                            principal = binding.get('principal', 'N/A')
-                            role = binding.get('role_name', 'N/A')
-                            print(f"         • {principal} → {role}")
-                    else:
-                        print("      🔓 Aucun role binding spécifique trouvé")
-                    
-                    # Méthode 2: Test avec API directe
-                    test_patterns = [
-                        f"*{cluster_id}*",
-                        f"*environment={env_id}*cloud-cluster={cluster_id}*",
-                        f"crn://confluent.cloud/organization=*/environment={env_id}/cloud-cluster={cluster_id}"
-                    ]
-                    
-                    print("      🔍 Tests API directs:")
-                    for pattern in test_patterns:
-                        encoded_pattern = urllib.parse.quote(pattern, safe='')
-                        test_url = f"{base_url}/iam/v2/role-bindings?crn_pattern={encoded_pattern}"
-                        
-                        test_response = requests.get(test_url, auth=auth, headers=headers)
-                        if test_response.status_code == 200:
-                            test_data = test_response.json()
-                            test_results = test_data.get('data', [])
-                            print(f"         Pattern '{pattern}': {len(test_results)} résultat(s)")
-                            
-                            if test_results and len(test_results) <= 3:  # Afficher si peu de résultats
-                                for result in test_results:
-                                    print(f"           → {result.get('principal')} : {result.get('role_name')}")
-                        else:
-                            print(f"         Pattern '{pattern}': Erreur {test_response.status_code}")
+                    if len(bindings) > 3:
+                        print(f"\n... et {len(bindings) - 3} autres")
+                else:
+                    print("Liste de role bindings vide")
             else:
-                print(f"\n   📭 Aucun cluster dans cet environnement")
-        else:
-            print(f"\n   ❌ Erreur lors de la récupération des clusters: {cluster_response.status_code}")
-    
-    # 3. Résumé des role bindings non attribués
-    print(f"\n\n" + "="*80)
-    print("RÉSUMÉ - ROLE BINDINGS NON ATTRIBUÉS À UN CLUSTER SPÉCIFIQUE")
-    print("="*80)
-    
-    unassigned_bindings = []
-    for binding in all_bindings:
-        crn = binding.get('crn_pattern', '')
-        # Si le CRN ne contient pas "cloud-cluster=", c'est probablement au niveau org/env
-        if 'cloud-cluster=' not in crn:
-            unassigned_bindings.append(binding)
-    
-    if unassigned_bindings:
-        print(f"\n{len(unassigned_bindings)} role binding(s) au niveau organisation/environnement:")
-        for binding in unassigned_bindings:
-            principal = binding.get('principal', 'N/A')
-            role = binding.get('role_name', 'N/A')
-            crn = binding.get('crn_pattern', 'N/A')
-            print(f"   • {principal} → {role}")
-            print(f"     CRN: {crn}")
+                print("Pas de clé 'data' dans la réponse")
+                print(f"Contenu: {json.dumps(data, indent=2)[:500]}...")
+                
+        except Exception as e:
+            print(f"Erreur parsing: {e}")
+            print(f"Réponse brute: {response.text[:500]}...")
     else:
-        print("\nTous les role bindings sont attribués à des clusters spécifiques.")
+        print(f"Erreur: {response.text[:300]}...")
+    
+    print("\n" + "="*60 + "\n")
+    
+    # 5. Informations sur l'organisation
+    print("5. 🏢 ORGANISATION")
+    print("-" * 50)
+    
+    response = requests.get(f"{base_url}/org/v2/organizations", auth=auth, headers=headers)
+    
+    print(f"Status: {response.status_code}")
+    if response.status_code == 200:
+        try:
+            data = response.json()
+            orgs = data.get('data', [])
+            print(f"Nombre d'organisations: {len(orgs)}\n")
+            
+            for org in orgs:
+                org_id = org.get('id', 'N/A')
+                org_name = org.get('display_name', 'Sans nom')
+                print(f"🏢 {org_name}")
+                print(f"   ID: {org_id}")
+                
+        except Exception as e:
+            print(f"Erreur parsing: {e}")
+            print(f"Réponse brute: {response.text[:500]}...")
+    else:
+        print(f"Erreur: {response.text[:300]}...")
 
 if __name__ == "__main__":
-    analyze_cluster_permissions()
+    list_everything()
