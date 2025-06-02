@@ -1,0 +1,326 @@
+import requests
+from requests.auth import HTTPBasicAuth
+import json
+import time
+from typing import Dict, List, Optional, Union
+from read_api_key_file import read_api_keys
+
+API_KEY, API_SECRET = read_api_keys("api-key-test.txt")
+
+class ConfluentRoleBindingManager:
+    """
+    Gestionnaire de Role Bindings pour Confluent Cloud
+    Inspiré du provider Terraform confluent_role_binding
+    """
+
+    def __init__(self, api_key: str, api_secret: str):
+        self.base_url = "https://api.confluent.cloud"
+        self.auth = HTTPBasicAuth(api_key, api_secret)
+        self.headers = {'Accept': 'application/json', 'Content-Type': 'application/json'}
+
+    def create_role_binding(
+        self,
+        principal: str,
+        role_name: str,
+        crn_pattern: str,
+        disable_wait_for_ready: bool = False
+    ) -> Dict:
+        """
+        Créer un role binding
+
+        Args:
+            principal: Principal à lier (ex: "User:u-111aaa" ou "User:sa-111aaa")
+            role_name: Nom du rôle (ex: "CloudClusterAdmin", "EnvironmentAdmin")
+            crn_pattern: Pattern CRN définissant la portée
+            disable_wait_for_ready: Désactiver l'attente de propagation
+
+        Returns:
+            Dict contenant les détails du role binding créé
+        """
+        payload = {
+            "principal": principal,
+            "role_name": role_name,
+            "crn_pattern": crn_pattern
+        }
+
+        print(f"🔄 Création du role binding...")
+        print(f"   Principal: {principal}")
+        print(f"   Role: {role_name}")
+        print(f"   CRN: {crn_pattern}")
+
+        try:
+            response = requests.post(
+                f"{self.base_url}/iam/v2/role-bindings",
+                json=payload,
+                auth=self.auth,
+                headers=self.headers
+            )
+
+            if response.status_code == 201:
+                role_binding = response.json()
+                binding_id = role_binding.get('id')
+                print(f"✅ Role binding créé avec succès: {binding_id}")
+
+                # Attendre la propagation si demandé (comportement Terraform par défaut)
+                if not disable_wait_for_ready:
+                    print(f"⏳ Attente de la propagation (90s)...")
+                    self._wait_for_ready(binding_id, timeout=90)
+
+                return role_binding
+            else:
+                error_msg = f"Erreur lors de la création: {response.status_code} - {response.text}"
+                print(f"❌ {error_msg}")
+                raise Exception(error_msg)
+
+        except Exception as e:
+            print(f"💥 Erreur: {e}")
+            raise
+
+    def get_role_binding(self, binding_id: str) -> Optional[Dict]:
+        """Récupérer un role binding par ID"""
+        try:
+            response = requests.get(
+                f"{self.base_url}/iam/v2/role-bindings/{binding_id}",
+                auth=self.auth,
+                headers=self.headers
+            )
+
+            if response.status_code == 200:
+                return response.json()
+            elif response.status_code == 404:
+                return None
+            else:
+                raise Exception(f"Erreur API: {response.status_code} - {response.text}")
+
+        except Exception as e:
+            print(f"Erreur lors de la récupération: {e}")
+            return None
+
+    def list_role_bindings(
+        self,
+        principal: Optional[str] = None,
+        role_name: Optional[str] = None,
+        crn_pattern: Optional[str] = None
+    ) -> List[Dict]:
+        """
+        Lister les role bindings avec filtres optionnels
+        (Équivalent du data source terraform)
+        """
+        params = {}
+        if principal:
+            params['principal'] = principal
+        if role_name:
+            params['role_name'] = role_name
+        if crn_pattern:
+            params['crn_pattern'] = crn_pattern
+
+        try:
+            response = requests.get(
+                f"{self.base_url}/iam/v2/role-bindings",
+                params=params,
+                auth=self.auth,
+                headers=self.headers
+            )
+
+            if response.status_code == 200:
+                data = response.json()
+                return data.get('data', [])
+            else:
+                print(f"Erreur lors de la liste: {response.status_code} - {response.text}")
+                return []
+
+        except Exception as e:
+            print(f"Erreur: {e}")
+            return []
+
+    def delete_role_binding(self, binding_id: str) -> bool:
+        """Supprimer un role binding"""
+        try:
+            response = requests.delete(
+                f"{self.base_url}/iam/v2/role-bindings/{binding_id}",
+                auth=self.auth,
+                headers=self.headers
+            )
+
+            if response.status_code == 204:
+                print(f"✅ Role binding {binding_id} supprimé avec succès")
+                return True
+            else:
+                print(f"❌ Erreur lors de la suppression: {response.status_code} - {response.text}")
+                return False
+
+        except Exception as e:
+            print(f"Erreur: {e}")
+            return False
+
+    def _wait_for_ready(self, binding_id: str, timeout: int = 90):
+        """Attendre que le role binding soit propagé (comme Terraform)"""
+        start_time = time.time()
+
+        while time.time() - start_time < timeout:
+            binding = self.get_role_binding(binding_id)
+            if binding:
+                # En théorie, on pourrait vérifier un statut, mais l'API ne l'expose pas
+                # Terraform fait juste une attente fixe de 90s
+                time.sleep(5)
+                break
+            time.sleep(2)
+
+        elapsed = time.time() - start_time
+        print(f"✅ Propagation terminée après {elapsed:.1f}s")
+
+class ConfluentResourceHelper:
+    """Helper pour construire les CRN patterns comme dans Terraform"""
+
+    @staticmethod
+    def organization_crn(org_id: str) -> str:
+        """CRN pour l'organisation entière"""
+        return f"crn://confluent.cloud/organization={org_id}"
+
+    @staticmethod
+    def environment_crn(org_id: str, env_id: str) -> str:
+        """CRN pour un environnement spécifique"""
+        return f"crn://confluent.cloud/organization={org_id}/environment={env_id}"
+
+    @staticmethod
+    def kafka_cluster_crn(org_id: str, env_id: str, cluster_id: str) -> str:
+        """CRN pour un cluster Kafka spécifique"""
+        return f"crn://confluent.cloud/organization={org_id}/environment={env_id}/cloud-cluster={cluster_id}"
+
+    @staticmethod
+    def kafka_topic_crn(org_id: str, env_id: str, cluster_id: str, topic_name: str = "*") -> str:
+        """CRN pour un/des topic(s) Kafka"""
+        return f"crn://confluent.cloud/organization={org_id}/environment={env_id}/cloud-cluster={cluster_id}/kafka={cluster_id}/topic={topic_name}"
+
+    @staticmethod
+    def kafka_consumer_group_crn(org_id: str, env_id: str, cluster_id: str, consumer_group: str = "*") -> str:
+        """CRN pour un/des consumer group(s) Kafka"""
+        return f"crn://confluent.cloud/organization={org_id}/environment={env_id}/cloud-cluster={cluster_id}/kafka={cluster_id}/group={consumer_group}"
+
+    @staticmethod
+    def kafka_transactional_id_crn(org_id: str, env_id: str, cluster_id: str, transactional_id: str = "*") -> str:
+        """CRN pour un/des transactional ID(s) Kafka"""
+        return f"crn://confluent.cloud/organization={org_id}/environment={env_id}/cloud-cluster={cluster_id}/kafka={cluster_id}/transactional-id={transactional_id}"
+
+# Exemples d'utilisation (inspirés des exemples Terraform)
+def example_usage():
+    """Exemples d'utilisation inspirés des configurations Terraform avec focus Consumer Groups"""
+
+    # Initialisation
+    manager = ConfluentRoleBindingManager(
+        api_key=API_KEY,
+        api_secret=API_SECRET
+    )
+
+    # IDs de vos ressources (à adapter selon votre environnement)
+    org_id = "org"
+    env_id = "env-"
+    cluster_id = "lkc-"
+    service_account_id = "sa-w"
+    user_id = "sa-"
+    prefix= "org.entity.projet"
+    helper = ConfluentResourceHelper()
+
+    print("=== ROLE BINDINGS POUR KAFKA COMPLET (TOPICS + CONSUMER GROUPS) ===\n")
+
+    # Configuration pour un développeur complet (Read + Write + Consumer Groups)
+    print("🚀 CONFIGURATION DÉVELOPPEUR COMPLET")
+    print("="*50)
+
+    try:
+        # 1. DeveloperWrite pour les topics
+        print("\n1. 📝 DeveloperWrite pour les topics")
+        topic_write_binding = manager.create_role_binding(
+            principal=f"User:{service_account_id}",
+            role_name="DeveloperWrite",
+            crn_pattern=helper.kafka_topic_crn(org_id, env_id, cluster_id, f"{prefix}.*")
+        )
+        print(f"   ✅ Topic Write: {topic_write_binding.get('id')}")
+
+        # 2. DeveloperRead pour les topics
+        print("\n2. 📖 DeveloperRead pour les topics")
+        topic_read_binding = manager.create_role_binding(
+            principal=f"User:{service_account_id}",
+            role_name="DeveloperRead",
+            crn_pattern=helper.kafka_topic_crn(org_id, env_id, cluster_id, f"{prefix}.*")
+        )
+        print(f"   ✅ Topic Read: {topic_read_binding.get('id')}")
+
+        # 3. DeveloperRead pour les consumer groups (NOUVEAU !)
+        print("\n3. 👥 DeveloperRead pour les consumer groups")
+        consumer_group_binding = manager.create_role_binding(
+            principal=f"User:{service_account_id}",
+            role_name="DeveloperRead",
+            crn_pattern=helper.kafka_consumer_group_crn(org_id, env_id, cluster_id, f"{prefix}.*")
+        )
+        print(f"   ✅ Consumer Groups: {consumer_group_binding.get('id')}")
+
+        # 4. (Optionnel) DeveloperWrite pour les transactional IDs si nécessaire
+        print("\n4. 🔄 DeveloperWrite pour les transactional IDs (optionnel)")
+        tx_id_binding = manager.create_role_binding(
+            principal=f"User:{service_account_id}",
+            role_name="DeveloperWrite",
+            crn_pattern=helper.kafka_transactional_id_crn(org_id, env_id, cluster_id, f"{prefix}.*")
+        )
+        print(f"   ✅ Transactional IDs: {tx_id_binding.get('id')}")
+
+    except Exception as e:
+        print(f"❌ Erreur lors de la création: {e}")
+
+    print("\n" + "="*60 + "\n")
+
+    # Vérification des permissions créées
+    print("🔍 VÉRIFICATION DES PERMISSIONS")
+    print("-"*40)
+
+    bindings = manager.list_role_bindings(principal=f"User:{service_account_id}")
+    print(f"Total role bindings pour {service_account_id}: {len(bindings)}")
+
+    # Grouper par type de ressource
+    topic_bindings = []
+    consumer_group_bindings = []
+    tx_id_bindings = []
+    other_bindings = []
+
+    for binding in bindings:
+        crn = binding.get('crn_pattern', '')
+        role = binding.get('role_name', '')
+        print(binding)
+        if '/topic=' in crn:
+            topic_bindings.append(f"{role} sur topics")
+        elif '/group=' in crn:
+            consumer_group_bindings.append(f"{role} sur consumer groups")
+        elif '/transactional-id=' in crn:
+            tx_id_bindings.append(f"{role} sur transactional IDs")
+        else:
+            other_bindings.append(f"{role} sur {crn}")
+
+    print(f"\n📊 Répartition des permissions:")
+    print(f"   Topics: {len(topic_bindings)} ({', '.join(topic_bindings)})")
+    print(f"   Consumer Groups: {len(consumer_group_bindings)} ({', '.join(consumer_group_bindings)})")
+    print(f"   Transactional IDs: {len(tx_id_bindings)} ({', '.join(tx_id_bindings)})")
+    print(f"   Autres: {len(other_bindings)}")
+
+    # Résumé pour le développeur
+    print(f"\n🎯 RÉSUMÉ POUR LE DÉVELOPPEUR:")
+    print(f"Avec ces permissions, le service account {service_account_id} peut:")
+    if topic_bindings:
+        if any('Write' in b for b in topic_bindings):
+            print(f"   ✅ Produire des messages vers tous les topics")
+        if any('Read' in b for b in topic_bindings):
+            print(f"   ✅ Lire des messages depuis tous les topics")
+
+    if consumer_group_bindings:
+        print(f"   ✅ Rejoindre et utiliser tous les consumer groups")
+    else:
+        print(f"   ⚠️  MANQUE: Permissions consumer groups (d'où votre erreur!)")
+
+    if tx_id_bindings:
+        print(f"   ✅ Utiliser les transactions Kafka")
+
+    print(f"\n✅ Configuration terminée!")
+
+if __name__ == "__main__":
+    print("Choisissez une option:")
+    print("1. Exemples complets (topics + consumer groups)")
+    example_usage()
