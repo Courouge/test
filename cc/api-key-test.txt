@@ -1,0 +1,19 @@
+=== Confluent Cloud API key ===
+
+API key:
+test
+
+API secret:
+test
+
+Resource scope:
+Kafka cluster
+
+Environment:
+env-test
+
+Resource:
+lkc-test
+
+Endpoint:
+https://lkc-test.confluent.cloud:443
