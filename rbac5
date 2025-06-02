@@ -5,6 +5,10 @@ import time
 from typing import Dict, List, Optional, Union
 from dataclasses import dataclass
 from enum import Enum
+from read_api_key_file import read_api_keys
+
+API_KEY, API_SECRET = read_api_keys("api-key-.txt")
+
 
 class TenantRole(Enum):
     """Rôles disponibles pour les tenants/projets"""
@@ -21,27 +25,27 @@ class TenantProject:
     organization: str
     entity: str
     project: str
-    
+
     @property
     def full_name(self) -> str:
         """Nom complet du projet: org.entity.project"""
         return f"{self.organization}.{self.entity}.{self.project}"
-    
+
     @property
     def topic_prefix(self) -> str:
         """Préfixe pour les topics: org.entity.project.*"""
         return f"{self.full_name}.*"
-    
+
     @property
     def exact_prefix(self) -> str:
         """Préfixe exact pour les resources: org.entity.project"""
         return self.full_name
-    
+
     @property
     def consumer_group_prefix(self) -> str:
         """Préfixe pour les consumer groups: cg-org.entity.project.*"""
         return f"cg-{self.full_name}.*"
-    
+
     @classmethod
     def from_string(cls, project_name: str) -> 'TenantProject':
         """Créer un TenantProject depuis une string org.entity.project"""
@@ -55,12 +59,12 @@ class ConfluentTenantManager:
     Gestionnaire de tenants/projets pour Confluent Cloud
     Basé sur ConfluentRoleBindingManager avec notion de projets multi-tenants
     """
-    
+
     def __init__(self, api_key: str, api_secret: str):
         self.base_url = "https://api.confluent.cloud"
         self.auth = HTTPBasicAuth(api_key, api_secret)
         self.headers = {'Accept': 'application/json', 'Content-Type': 'application/json'}
-    
+
     def create_tenant_role_binding(
         self,
         tenant_project: Union[str, TenantProject],
@@ -74,7 +78,7 @@ class ConfluentTenantManager:
     ) -> Dict:
         """
         Créer un role binding pour un tenant/projet
-        
+
         Args:
             tenant_project: Nom du projet (org.entity.project) ou objet TenantProject
             principal: Principal à lier (ex: "User:sa-111aaa")
@@ -84,37 +88,37 @@ class ConfluentTenantManager:
             org_id: ID de l'organisation
             resource_type: Type de ressource ("topic", "consumer-group", "cluster")
             disable_wait_for_ready: Désactiver l'attente de propagation
-        
+
         Returns:
             Dict contenant les détails du role binding créé
         """
         if isinstance(tenant_project, str):
             tenant_project = TenantProject.from_string(tenant_project)
-        
+
         if isinstance(role, TenantRole):
             # Mapping des rôles tenant vers les rôles Confluent
             confluent_role = self._map_tenant_role_to_confluent(role, resource_type)
         else:
             confluent_role = role
-        
+
         # Construction du CRN selon le type de ressource
         crn_pattern = self._build_tenant_crn(
             tenant_project, resource_type, cluster_id, env_id, org_id
         )
-        
+
         print(f"🏢 Création role binding pour tenant: {tenant_project.full_name}")
         print(f"   Principal: {principal}")
         print(f"   Rôle tenant: {role} → Confluent: {confluent_role}")
         print(f"   Resource: {resource_type}")
         print(f"   CRN: {crn_pattern}")
-        
+
         return self._create_role_binding(
             principal=principal,
             role_name=confluent_role,
             crn_pattern=crn_pattern,
             disable_wait_for_ready=disable_wait_for_ready
         )
-    
+
     def setup_tenant_project(
         self,
         tenant_project: Union[str, TenantProject],
@@ -126,26 +130,26 @@ class ConfluentTenantManager:
     ) -> List[Dict]:
         """
         Setup complet d'un projet tenant avec tous les role bindings nécessaires
-        
+
         Args:
             tenant_project: Nom du projet
             owner_principal: Principal propriétaire du projet
             cluster_id: ID du cluster
-            env_id: ID de l'environnement  
+            env_id: ID de l'environnement
             org_id: ID de l'organisation
             additional_principals: Liste de {"principal": "User:xxx", "role": TenantRole.XXX}
-        
+
         Returns:
             Liste des role bindings créés
         """
         if isinstance(tenant_project, str):
             tenant_project = TenantProject.from_string(tenant_project)
-        
+
         print(f"🚀 Setup du projet tenant: {tenant_project.full_name}")
         print("="*60)
-        
+
         created_bindings = []
-        
+
         # 1. Owner avec accès complet aux topics
         print("\n1. 👑 Configuration Owner (Topics)")
         try:
@@ -161,7 +165,7 @@ class ConfluentTenantManager:
             created_bindings.append(topic_binding)
         except Exception as e:
             print(f"❌ Erreur owner topics: {e}")
-        
+
         # 2. Owner avec accès aux consumer groups
         print("\n2. 👑 Configuration Owner (Consumer Groups)")
         try:
@@ -177,18 +181,18 @@ class ConfluentTenantManager:
             created_bindings.append(cg_binding)
         except Exception as e:
             print(f"❌ Erreur owner consumer groups: {e}")
-        
+
         # 3. Principals additionnels
         if additional_principals:
             print(f"\n3. 👥 Configuration des {len(additional_principals)} principal(s) additionnels")
-            
+
             for i, principal_config in enumerate(additional_principals, 1):
                 principal = principal_config.get('principal')
                 role = principal_config.get('role', TenantRole.DEVELOPER)
                 resources = principal_config.get('resources', ['topic', 'consumer-group'])
-                
+
                 print(f"\n   3.{i} {principal} → {role.value}")
-                
+
                 for resource_type in resources:
                     try:
                         binding = self.create_tenant_role_binding(
@@ -204,10 +208,10 @@ class ConfluentTenantManager:
                         created_bindings.append(binding)
                     except Exception as e:
                         print(f"      ❌ Erreur {resource_type}: {e}")
-        
+
         print(f"\n✅ Setup terminé: {len(created_bindings)} role binding(s) créé(s)")
         return created_bindings
-    
+
     def list_tenant_role_bindings(
         self,
         tenant_project: Union[str, TenantProject],
@@ -218,23 +222,23 @@ class ConfluentTenantManager:
         """Lister tous les role bindings d'un projet tenant"""
         if isinstance(tenant_project, str):
             tenant_project = TenantProject.from_string(tenant_project)
-        
+
         print(f"📋 Recherche des role bindings pour: {tenant_project.full_name}")
-        
+
         all_bindings = []
-        
+
         # Chercher pour les topics
         topic_crn = self._build_tenant_crn(tenant_project, "topic", cluster_id, env_id, org_id)
         topic_bindings = self._list_role_bindings(crn_pattern=topic_crn)
         all_bindings.extend(topic_bindings)
-        
+
         # Chercher pour les consumer groups
         cg_crn = self._build_tenant_crn(tenant_project, "consumer-group", cluster_id, env_id, org_id)
         cg_bindings = self._list_role_bindings(crn_pattern=cg_crn)
         all_bindings.extend(cg_bindings)
-        
+
         print(f"   Trouvé: {len(all_bindings)} role binding(s)")
-        
+
         # Affichage détaillé
         for binding in all_bindings:
             principal = binding.get('principal', 'N/A')
@@ -242,9 +246,9 @@ class ConfluentTenantManager:
             crn = binding.get('crn_pattern', 'N/A')
             resource_type = "topic" if "/topic=" in crn else "consumer-group" if "/consumer-group=" in crn else "unknown"
             print(f"   • {principal} → {role} ({resource_type})")
-        
+
         return all_bindings
-    
+
     def cleanup_tenant_project(
         self,
         tenant_project: Union[str, TenantProject],
@@ -255,25 +259,25 @@ class ConfluentTenantManager:
         """Supprimer tous les role bindings d'un projet tenant"""
         if isinstance(tenant_project, str):
             tenant_project = TenantProject.from_string(tenant_project)
-        
+
         print(f"🗑️  Cleanup du projet tenant: {tenant_project.full_name}")
-        
+
         # Récupérer tous les bindings
         bindings = self.list_tenant_role_bindings(tenant_project, cluster_id, env_id, org_id)
-        
+
         deleted_count = 0
         for binding in bindings:
             binding_id = binding.get('id')
             if binding_id:
                 if self._delete_role_binding(binding_id):
                     deleted_count += 1
-        
+
         print(f"✅ Cleanup terminé: {deleted_count}/{len(bindings)} role binding(s) supprimé(s)")
         return deleted_count
-    
+
     def _map_tenant_role_to_confluent(self, tenant_role: TenantRole, resource_type: str) -> str:
         """Mapper les rôles tenant vers les rôles Confluent standard"""
-        
+
         # Mapping selon le type de ressource et le rôle
         mappings = {
             TenantRole.OWNER: {
@@ -283,7 +287,7 @@ class ConfluentTenantManager:
             },
             TenantRole.ADMIN: {
                 "topic": "DeveloperWrite",
-                "consumer-group": "DeveloperRead", 
+                "consumer-group": "DeveloperRead",
                 "cluster": "DeveloperManage"
             },
             TenantRole.DEVELOPER: {
@@ -307,9 +311,9 @@ class ConfluentTenantManager:
                 "cluster": "DeveloperRead"
             }
         }
-        
+
         return mappings.get(tenant_role, {}).get(resource_type, "DeveloperRead")
-    
+
     def _build_tenant_crn(
         self,
         tenant_project: TenantProject,
@@ -319,9 +323,9 @@ class ConfluentTenantManager:
         org_id: str
     ) -> str:
         """Construire le CRN pour un tenant selon le type de ressource"""
-        
+
         base_crn = f"crn://confluent.cloud/organization={org_id}/environment={env_id}/cloud-cluster={cluster_id}/kafka={cluster_id}"
-        
+
         if resource_type == "topic":
             return f"{base_crn}/topic={tenant_project.topic_prefix}"
         elif resource_type == "consumer-group":
@@ -330,7 +334,7 @@ class ConfluentTenantManager:
             return f"crn://confluent.cloud/organization={org_id}/environment={env_id}/cloud-cluster={cluster_id}"
         else:
             raise ValueError(f"Type de ressource non supporté: {resource_type}")
-    
+
     # Méthodes de base (reprises de ConfluentRoleBindingManager)
     def _create_role_binding(self, principal: str, role_name: str, crn_pattern: str, disable_wait_for_ready: bool = False) -> Dict:
         """Créer un role binding (méthode interne)"""
@@ -339,7 +343,7 @@ class ConfluentTenantManager:
             "role_name": role_name,
             "crn_pattern": crn_pattern
         }
-        
+
         try:
             response = requests.post(
                 f"{self.base_url}/iam/v2/role-bindings",
@@ -347,36 +351,36 @@ class ConfluentTenantManager:
                 auth=self.auth,
                 headers=self.headers
             )
-            
+
             if response.status_code == 201:
                 role_binding = response.json()
                 binding_id = role_binding.get('id')
                 print(f"   ✅ Role binding créé: {binding_id}")
-                
+
                 if not disable_wait_for_ready:
                     print(f"   ⏳ Attente propagation...")
                     time.sleep(2)  # Attente réduite pour les opérations bulk
-                
+
                 return role_binding
             else:
                 error_msg = f"Erreur création: {response.status_code} - {response.text}"
                 print(f"   ❌ {error_msg}")
                 raise Exception(error_msg)
-                
+
         except Exception as e:
             print(f"   💥 Erreur: {e}")
             raise
-    
+
     def _list_role_bindings(self, principal: Optional[str] = None, role_name: Optional[str] = None, crn_pattern: Optional[str] = None) -> List[Dict]:
         """Lister les role bindings avec filtres"""
         params = {}
         if principal:
             params['principal'] = principal
         if role_name:
-            params['role_name'] = role_name  
+            params['role_name'] = role_name
         if crn_pattern:
             params['crn_pattern'] = crn_pattern
-        
+
         try:
             response = requests.get(
                 f"{self.base_url}/iam/v2/role-bindings",
@@ -384,16 +388,16 @@ class ConfluentTenantManager:
                 auth=self.auth,
                 headers=self.headers
             )
-            
+
             if response.status_code == 200:
                 data = response.json()
                 return data.get('data', [])
             else:
                 return []
-                
+
         except Exception:
             return []
-    
+
     def _delete_role_binding(self, binding_id: str) -> bool:
         """Supprimer un role binding"""
         try:
@@ -402,14 +406,14 @@ class ConfluentTenantManager:
                 auth=self.auth,
                 headers=self.headers
             )
-            
+
             if response.status_code == 204:
                 print(f"   ✅ Supprimé: {binding_id}")
                 return True
             else:
                 print(f"   ❌ Erreur suppression {binding_id}: {response.status_code}")
                 return False
-                
+
         except Exception as e:
             print(f"   💥 Erreur: {e}")
             return False
@@ -417,72 +421,64 @@ class ConfluentTenantManager:
 # Exemple d'utilisation
 def example_tenant_usage():
     """Exemple d'utilisation du gestionnaire de tenants"""
-    
+
     # Configuration
     manager = ConfluentTenantManager(
-        api_key="VOTRE_API_KEY",
-        api_secret="VOTRE_API_SECRET"
+        api_key=API_KEY,
+        api_secret=API_SECRET
     )
-    
+
+
+
     # IDs de votre infrastructure
-    org_id = "1111aaaa-11aa-11aa-11aa-111111aaaaaa"
-    env_id = "env-aaa1111"
-    cluster_id = "lkc-1111aaa"
-    
+    org_id = ""
+    env_id = ""
+    cluster_id = ""
+
+    owner_principal = ""
+    user_id = ""
+
+
     print("=== GESTION DE PROJETS TENANTS ===\n")
-    
+
     # 1. Créer un projet tenant
-    project = TenantProject("mycompany", "analytics", "userdata")
+    project = TenantProject("taas", "cagip", "projet1")
     print(f"📁 Projet: {project.full_name}")
     print(f"   Topics prefix: {project.topic_prefix}")
     print(f"   Consumer groups prefix: {project.consumer_group_prefix}")
-    
+
     # 2. Setup complet du projet
     try:
         bindings = manager.setup_tenant_project(
             tenant_project=project,
-            owner_principal="User:sa-owner123",
+            owner_principal=f"User:{owner_principal}",
             cluster_id=cluster_id,
             env_id=env_id,
             org_id=org_id,
             additional_principals=[
                 {
-                    "principal": "User:sa-dev123",
+                    "principal": f"User:{owner_principal}",
                     "role": TenantRole.DEVELOPER,
-                    "resources": ["topic", "consumer-group"]
+                    "resources": ["topic"]
                 },
                 {
-                    "principal": "User:sa-reader123", 
+                    "principal": f"User:{owner_principal}",
                     "role": TenantRole.READER,
                     "resources": ["topic"]
                 }
             ]
         )
+
+
         print(f"\n🎉 Projet configuré avec {len(bindings)} role bindings")
-        
+
     except Exception as e:
         print(f"❌ Erreur setup: {e}")
-    
+
     # 3. Lister les role bindings du projet
     print(f"\n" + "="*60)
     manager.list_tenant_role_bindings(project, cluster_id, env_id, org_id)
-    
-    # 4. Ajouter un nouveau développeur
-    print(f"\n" + "="*60)
-    print("➕ Ajout d'un nouveau développeur")
-    try:
-        new_binding = manager.create_tenant_role_binding(
-            tenant_project="mycompany.analytics.userdata",  # String aussi supporté
-            principal="User:sa-newdev456",
-            role=TenantRole.DEVELOPER,
-            cluster_id=cluster_id,
-            env_id=env_id,
-            org_id=org_id,
-            resource_type="topic"
-        )
-        print(f"✅ Nouveau développeur ajouté: {new_binding.get('id')}")
-    except Exception as e:
-        print(f"❌ Erreur: {e}")
+
 
 if __name__ == "__main__":
     example_tenant_usage()
