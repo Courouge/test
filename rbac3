@@ -5,183 +5,165 @@ import json
 api_key = "VOTRE_API_KEY"
 api_secret = "VOTRE_API_SECRET"
 
-def list_everything():
+def debug_role_bindings():
     base_url = "https://api.confluent.cloud"
     auth = HTTPBasicAuth(api_key, api_secret)
-    headers = {'Content-Type': 'application/json'}
     
-    print("=== INVENTAIRE COMPLET CONFLUENT CLOUD ===\n")
+    print("=== DEBUG ROLE BINDINGS ===\n")
     
-    # 1. Service Accounts
-    print("1. 🤖 SERVICE ACCOUNTS")
-    print("-" * 50)
+    # Test 1: Headers différents
+    print("1. 🧪 Test avec différents headers")
+    print("-" * 40)
     
-    response = requests.get(f"{base_url}/iam/v2/service-accounts", auth=auth, headers=headers)
+    header_variants = [
+        {'Content-Type': 'application/json'},
+        {'Accept': 'application/json'},
+        {'Content-Type': 'application/json', 'Accept': 'application/json'},
+        {}  # Pas de headers
+    ]
     
-    print(f"Status: {response.status_code}")
-    if response.status_code == 200:
+    for i, headers in enumerate(header_variants, 1):
+        print(f"\nTest {i}: Headers = {headers}")
+        
         try:
-            data = response.json()
-            service_accounts = data.get('data', [])
-            print(f"Nombre de Service Accounts: {len(service_accounts)}\n")
+            response = requests.get(f"{base_url}/iam/v2/role-bindings", auth=auth, headers=headers)
+            print(f"   Status: {response.status_code}")
             
-            if service_accounts:
-                for sa in service_accounts:
-                    sa_id = sa.get('id', 'N/A')
-                    sa_name = sa.get('display_name', 'Sans nom')
-                    sa_desc = sa.get('description', 'Pas de description')
-                    print(f"📋 {sa_name}")
-                    print(f"   ID: {sa_id}")
-                    print(f"   Description: {sa_desc}")
-                    print()
-            else:
-                print("Aucun Service Account trouvé")
-                
-        except Exception as e:
-            print(f"Erreur parsing: {e}")
-            print(f"Réponse brute: {response.text[:500]}...")
-    else:
-        print(f"Erreur: {response.text[:300]}...")
-    
-    print("\n" + "="*60 + "\n")
-    
-    # 2. API Keys
-    print("2. 🔑 API KEYS")
-    print("-" * 50)
-    
-    response = requests.get(f"{base_url}/iam/v2/api-keys", auth=auth, headers=headers)
-    
-    print(f"Status: {response.status_code}")
-    if response.status_code == 200:
-        try:
-            data = response.json()
-            api_keys = data.get('data', [])
-            print(f"Nombre d'API Keys: {len(api_keys)}\n")
-            
-            if api_keys:
-                for key in api_keys:
-                    key_id = key.get('id', 'N/A')
-                    key_desc = key.get('description', 'Pas de description')
-                    owner = key.get('owner', {})
-                    owner_id = owner.get('id', 'N/A') if owner else 'N/A'
-                    spec = key.get('spec', {})
-                    resource = spec.get('resource', {}) if spec else {}
-                    resource_id = resource.get('id', 'N/A') if resource else 'N/A'
+            if response.status_code == 200:
+                try:
+                    data = response.json()
+                    bindings = data.get('data', [])
+                    print(f"   ✅ Succès! {len(bindings)} role binding(s)")
                     
-                    print(f"🔐 API Key: {key_id}")
-                    print(f"   Description: {key_desc}")
-                    print(f"   Owner: {owner_id}")
-                    print(f"   Resource: {resource_id}")
-                    print()
-            else:
-                print("Aucune API Key trouvée")
-                
-        except Exception as e:
-            print(f"Erreur parsing: {e}")
-            print(f"Réponse brute: {response.text[:500]}...")
-    else:
-        print(f"Erreur: {response.text[:300]}...")
-    
-    print("\n" + "="*60 + "\n")
-    
-    # 3. Utilisateurs
-    print("3. 👥 UTILISATEURS")
-    print("-" * 50)
-    
-    response = requests.get(f"{base_url}/iam/v2/users", auth=auth, headers=headers)
-    
-    print(f"Status: {response.status_code}")
-    if response.status_code == 200:
-        try:
-            data = response.json()
-            users = data.get('data', [])
-            print(f"Nombre d'utilisateurs: {len(users)}\n")
-            
-            if users:
-                for user in users:
-                    user_id = user.get('id', 'N/A')
-                    user_email = user.get('email', 'Pas d\'email')
-                    user_name = user.get('full_name', 'Pas de nom')
+                    if bindings and len(bindings) <= 2:  # Afficher si peu de résultats
+                        for binding in bindings:
+                            print(f"      - {binding.get('principal')} → {binding.get('role_name')}")
+                    break  # Sortir dès qu'on a du succès
                     
-                    print(f"👤 {user_name}")
-                    print(f"   ID: {user_id}")
-                    print(f"   Email: {user_email}")
-                    print()
+                except Exception as e:
+                    print(f"   ⚠️  JSON Error: {e}")
+                    print(f"   Raw: {response.text[:200]}...")
             else:
-                print("Aucun utilisateur trouvé")
+                print(f"   ❌ Error: {response.text[:200]}...")
                 
         except Exception as e:
-            print(f"Erreur parsing: {e}")
-            print(f"Réponse brute: {response.text[:500]}...")
-    else:
-        print(f"Erreur: {response.text[:300]}...")
+            print(f"   💥 Request Error: {e}")
     
     print("\n" + "="*60 + "\n")
     
-    # 4. Test simple des role bindings
-    print("4. 🔒 TEST SIMPLE DES ROLE BINDINGS")
+    # Test 2: Méthodes HTTP différentes
+    print("2. 🧪 Test avec méthodes HTTP différentes")
     print("-" * 50)
     
-    response = requests.get(f"{base_url}/iam/v2/role-bindings", auth=auth, headers=headers)
+    headers = {'Accept': 'application/json'}  # Utiliser Accept au lieu de Content-Type
     
-    print(f"Status: {response.status_code}")
-    if response.status_code == 200:
+    methods = ['GET', 'POST']
+    for method in methods:
+        print(f"\nTest {method}:")
+        
         try:
-            data = response.json()
-            print(f"Structure de la réponse: {list(data.keys()) if data else 'Vide'}")
+            if method == 'GET':
+                response = requests.get(f"{base_url}/iam/v2/role-bindings", auth=auth, headers=headers)
+            else:
+                # POST avec body vide
+                response = requests.post(f"{base_url}/iam/v2/role-bindings", auth=auth, headers=headers, json={})
             
-            if 'data' in data:
-                bindings = data['data']
-                print(f"Nombre de role bindings: {len(bindings)}")
-                
-                if bindings:
-                    print("\nPremiers role bindings:")
-                    for i, binding in enumerate(bindings[:3]):  # Afficher seulement les 3 premiers
-                        print(f"\n🔗 Binding #{i+1}:")
-                        print(f"   Principal: {binding.get('principal', 'N/A')}")
-                        print(f"   Role: {binding.get('role_name', 'N/A')}")
-                        print(f"   CRN: {binding.get('crn_pattern', 'N/A')}")
+            print(f"   Status: {response.status_code}")
+            print(f"   Response: {response.text[:300]}...")
+            
+        except Exception as e:
+            print(f"   Error: {e}")
+    
+    print("\n" + "="*60 + "\n")
+    
+    # Test 3: Avec paramètres simples
+    print("3. 🧪 Test avec paramètres simples")
+    print("-" * 40)
+    
+    headers = {'Accept': 'application/json'}
+    
+    # Récupérer d'abord les utilisateurs pour avoir un principal valide
+    user_response = requests.get(f"{base_url}/iam/v2/users", auth=auth, headers=headers)
+    
+    test_principal = None
+    if user_response.status_code == 200:
+        users = user_response.json().get('data', [])
+        if users:
+            test_principal = f"User:{users[0].get('id')}"
+            print(f"Principal de test trouvé: {test_principal}")
+    
+    param_tests = [
+        {},  # Aucun paramètre
+        {'page_size': '10'},  # Pagination
+        {'principal': test_principal} if test_principal else {'role_name': 'OrganizationAdmin'},  # Filtre simple
+    ]
+    
+    for i, params in enumerate(param_tests, 1):
+        print(f"\nTest {i}: Params = {params}")
+        
+        try:
+            response = requests.get(f"{base_url}/iam/v2/role-bindings", 
+                                    auth=auth, headers=headers, params=params)
+            print(f"   Status: {response.status_code}")
+            print(f"   URL finale: {response.url}")
+            
+            if response.status_code == 200:
+                try:
+                    data = response.json()
+                    bindings = data.get('data', [])
+                    print(f"   ✅ Succès! {len(bindings)} résultat(s)")
                     
-                    if len(bindings) > 3:
-                        print(f"\n... et {len(bindings) - 3} autres")
-                else:
-                    print("Liste de role bindings vide")
+                    if bindings:
+                        print("   📋 Exemple de role binding:")
+                        binding = bindings[0]
+                        for key, value in binding.items():
+                            print(f"      {key}: {value}")
+                        break
+                    
+                except Exception as e:
+                    print(f"   JSON Error: {e}")
             else:
-                print("Pas de clé 'data' dans la réponse")
-                print(f"Contenu: {json.dumps(data, indent=2)[:500]}...")
+                print(f"   ❌ Erreur: {response.text[:200]}...")
                 
         except Exception as e:
-            print(f"Erreur parsing: {e}")
-            print(f"Réponse brute: {response.text[:500]}...")
-    else:
-        print(f"Erreur: {response.text[:300]}...")
+            print(f"   Request Error: {e}")
     
     print("\n" + "="*60 + "\n")
     
-    # 5. Informations sur l'organisation
-    print("5. 🏢 ORGANISATION")
-    print("-" * 50)
+    # Test 4: Vérifier la version de l'API
+    print("4. 🧪 Test versions d'API alternatives")
+    print("-" * 45)
     
-    response = requests.get(f"{base_url}/org/v2/organizations", auth=auth, headers=headers)
+    api_versions = [
+        "/iam/v2/role-bindings",
+        "/iam/v1/role-bindings",  # Version antérieure
+        "/rbac/v1/role-bindings",  # Autre endpoint possible
+    ]
     
-    print(f"Status: {response.status_code}")
-    if response.status_code == 200:
+    headers = {'Accept': 'application/json'}
+    
+    for endpoint in api_versions:
+        print(f"\nTest: {endpoint}")
+        
         try:
-            data = response.json()
-            orgs = data.get('data', [])
-            print(f"Nombre d'organisations: {len(orgs)}\n")
+            response = requests.get(f"{base_url}{endpoint}", auth=auth, headers=headers)
+            print(f"   Status: {response.status_code}")
             
-            for org in orgs:
-                org_id = org.get('id', 'N/A')
-                org_name = org.get('display_name', 'Sans nom')
-                print(f"🏢 {org_name}")
-                print(f"   ID: {org_id}")
+            if response.status_code == 200:
+                print(f"   ✅ Endpoint valide!")
+                try:
+                    data = response.json()
+                    if 'data' in data:
+                        print(f"   📊 {len(data['data'])} élément(s)")
+                except:
+                    pass
+            elif response.status_code == 404:
+                print(f"   ⚠️  Endpoint non trouvé")
+            else:
+                print(f"   ❌ {response.text[:100]}...")
                 
         except Exception as e:
-            print(f"Erreur parsing: {e}")
-            print(f"Réponse brute: {response.text[:500]}...")
-    else:
-        print(f"Erreur: {response.text[:300]}...")
+            print(f"   Error: {e}")
 
 if __name__ == "__main__":
-    list_everything()
+    debug_role_bindings()
