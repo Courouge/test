@@ -3,347 +3,48 @@ from requests.auth import HTTPBasicAuth
 import json
 import time
 from typing import Dict, List, Optional, Union
-from dataclasses import dataclass
-from enum import Enum
-from read_api_key_file import read_api_keys
 
-API_KEY, API_SECRET = read_api_keys("api-key-.txt")
-
-
-class TenantRole(Enum):
-    """Rôles disponibles pour les tenants/projets"""
-    OWNER = "TenantOwner"           # Accès complet au tenant
-    ADMIN = "TenantAdmin"           # Admin du tenant
-    DEVELOPER = "TenantDeveloper"   # Développeur avec accès read/write
-    READER = "TenantReader"         # Lecture seule
-    PRODUCER = "TenantProducer"     # Ecriture sur les topics du tenant
-    CONSUMER = "TenantConsumer"     # Lecture des topics du tenant
-
-@dataclass
-class TenantProject:
-    """Représentation d'un projet tenant"""
-    organization: str
-    entity: str
-    project: str
-
-    @property
-    def full_name(self) -> str:
-        """Nom complet du projet: org.entity.project"""
-        return f"{self.organization}.{self.entity}.{self.project}"
-
-    @property
-    def topic_prefix(self) -> str:
-        """Préfixe pour les topics: org.entity.project.*"""
-        return f"{self.full_name}.*"
-
-    @property
-    def exact_prefix(self) -> str:
-        """Préfixe exact pour les resources: org.entity.project"""
-        return self.full_name
-
-    @property
-    def consumer_group_prefix(self) -> str:
-        """Préfixe pour les consumer groups: cg-org.entity.project.*"""
-        return f"cg-{self.full_name}.*"
-
-    @classmethod
-    def from_string(cls, project_name: str) -> 'TenantProject':
-        """Créer un TenantProject depuis une string org.entity.project"""
-        parts = project_name.split('.')
-        if len(parts) != 3:
-            raise ValueError(f"Format invalide. Attendu: org.entity.project, reçu: {project_name}")
-        return cls(parts[0], parts[1], parts[2])
-
-class ConfluentTenantManager:
+class ConfluentRoleBindingManager:
     """
-    Gestionnaire de tenants/projets pour Confluent Cloud
-    Basé sur ConfluentRoleBindingManager avec notion de projets multi-tenants
+    Gestionnaire de Role Bindings pour Confluent Cloud
+    Inspiré du provider Terraform confluent_role_binding
     """
-
+    
     def __init__(self, api_key: str, api_secret: str):
         self.base_url = "https://api.confluent.cloud"
         self.auth = HTTPBasicAuth(api_key, api_secret)
         self.headers = {'Accept': 'application/json', 'Content-Type': 'application/json'}
-
-    def create_tenant_role_binding(
-        self,
-        tenant_project: Union[str, TenantProject],
-        principal: str,
-        role: Union[str, TenantRole],
-        cluster_id: str,
-        env_id: str,
-        org_id: str,
-        resource_type: str = "topic",
+    
+    def create_role_binding(
+        self, 
+        principal: str, 
+        role_name: str, 
+        crn_pattern: str,
         disable_wait_for_ready: bool = False
     ) -> Dict:
         """
-        Créer un role binding pour un tenant/projet
-
+        Créer un role binding
+        
         Args:
-            tenant_project: Nom du projet (org.entity.project) ou objet TenantProject
-            principal: Principal à lier (ex: "User:sa-111aaa")
-            role: Rôle du tenant ou rôle Confluent standard
-            cluster_id: ID du cluster Kafka
-            env_id: ID de l'environnement
-            org_id: ID de l'organisation
-            resource_type: Type de ressource ("topic", "consumer-group", "cluster")
+            principal: Principal à lier (ex: "User:u-111aaa" ou "User:sa-111aaa")
+            role_name: Nom du rôle (ex: "CloudClusterAdmin", "EnvironmentAdmin")
+            crn_pattern: Pattern CRN définissant la portée
             disable_wait_for_ready: Désactiver l'attente de propagation
-
+        
         Returns:
             Dict contenant les détails du role binding créé
         """
-        if isinstance(tenant_project, str):
-            tenant_project = TenantProject.from_string(tenant_project)
-
-        if isinstance(role, TenantRole):
-            # Mapping des rôles tenant vers les rôles Confluent
-            confluent_role = self._map_tenant_role_to_confluent(role, resource_type)
-        else:
-            confluent_role = role
-
-        # Construction du CRN selon le type de ressource
-        crn_pattern = self._build_tenant_crn(
-            tenant_project, resource_type, cluster_id, env_id, org_id
-        )
-
-        print(f"🏢 Création role binding pour tenant: {tenant_project.full_name}")
-        print(f"   Principal: {principal}")
-        print(f"   Rôle tenant: {role} → Confluent: {confluent_role}")
-        print(f"   Resource: {resource_type}")
-        print(f"   CRN: {crn_pattern}")
-
-        return self._create_role_binding(
-            principal=principal,
-            role_name=confluent_role,
-            crn_pattern=crn_pattern,
-            disable_wait_for_ready=disable_wait_for_ready
-        )
-
-    def setup_tenant_project(
-        self,
-        tenant_project: Union[str, TenantProject],
-        owner_principal: str,
-        cluster_id: str,
-        env_id: str,
-        org_id: str,
-        additional_principals: Optional[List[Dict]] = None
-    ) -> List[Dict]:
-        """
-        Setup complet d'un projet tenant avec tous les role bindings nécessaires
-
-        Args:
-            tenant_project: Nom du projet
-            owner_principal: Principal propriétaire du projet
-            cluster_id: ID du cluster
-            env_id: ID de l'environnement
-            org_id: ID de l'organisation
-            additional_principals: Liste de {"principal": "User:xxx", "role": TenantRole.XXX}
-
-        Returns:
-            Liste des role bindings créés
-        """
-        if isinstance(tenant_project, str):
-            tenant_project = TenantProject.from_string(tenant_project)
-
-        print(f"🚀 Setup du projet tenant: {tenant_project.full_name}")
-        print("="*60)
-
-        created_bindings = []
-
-        # 1. Owner avec accès complet aux topics
-        print("\n1. 👑 Configuration Owner (Topics)")
-        try:
-            topic_binding = self.create_tenant_role_binding(
-                tenant_project=tenant_project,
-                principal=owner_principal,
-                role=TenantRole.OWNER,
-                cluster_id=cluster_id,
-                env_id=env_id,
-                org_id=org_id,
-                resource_type="topic"
-            )
-            created_bindings.append(topic_binding)
-        except Exception as e:
-            print(f"❌ Erreur owner topics: {e}")
-
-        # 2. Owner avec accès aux consumer groups
-        print("\n2. 👑 Configuration Owner (Consumer Groups)")
-        try:
-            cg_binding = self.create_tenant_role_binding(
-                tenant_project=tenant_project,
-                principal=owner_principal,
-                role=TenantRole.OWNER,
-                cluster_id=cluster_id,
-                env_id=env_id,
-                org_id=org_id,
-                resource_type="consumer-group"
-            )
-            created_bindings.append(cg_binding)
-        except Exception as e:
-            print(f"❌ Erreur owner consumer groups: {e}")
-
-        # 3. Principals additionnels
-        if additional_principals:
-            print(f"\n3. 👥 Configuration des {len(additional_principals)} principal(s) additionnels")
-
-            for i, principal_config in enumerate(additional_principals, 1):
-                principal = principal_config.get('principal')
-                role = principal_config.get('role', TenantRole.DEVELOPER)
-                resources = principal_config.get('resources', ['topic', 'consumer-group'])
-
-                print(f"\n   3.{i} {principal} → {role.value}")
-
-                for resource_type in resources:
-                    try:
-                        binding = self.create_tenant_role_binding(
-                            tenant_project=tenant_project,
-                            principal=principal,
-                            role=role,
-                            cluster_id=cluster_id,
-                            env_id=env_id,
-                            org_id=org_id,
-                            resource_type=resource_type,
-                            disable_wait_for_ready=True  # Skip wait pour les bulk operations
-                        )
-                        created_bindings.append(binding)
-                    except Exception as e:
-                        print(f"      ❌ Erreur {resource_type}: {e}")
-
-        print(f"\n✅ Setup terminé: {len(created_bindings)} role binding(s) créé(s)")
-        return created_bindings
-
-    def list_tenant_role_bindings(
-        self,
-        tenant_project: Union[str, TenantProject],
-        cluster_id: str,
-        env_id: str,
-        org_id: str
-    ) -> List[Dict]:
-        """Lister tous les role bindings d'un projet tenant"""
-        if isinstance(tenant_project, str):
-            tenant_project = TenantProject.from_string(tenant_project)
-
-        print(f"📋 Recherche des role bindings pour: {tenant_project.full_name}")
-
-        all_bindings = []
-
-        # Chercher pour les topics
-        topic_crn = self._build_tenant_crn(tenant_project, "topic", cluster_id, env_id, org_id)
-        topic_bindings = self._list_role_bindings(crn_pattern=topic_crn)
-        all_bindings.extend(topic_bindings)
-
-        # Chercher pour les consumer groups
-        cg_crn = self._build_tenant_crn(tenant_project, "consumer-group", cluster_id, env_id, org_id)
-        cg_bindings = self._list_role_bindings(crn_pattern=cg_crn)
-        all_bindings.extend(cg_bindings)
-
-        print(f"   Trouvé: {len(all_bindings)} role binding(s)")
-
-        # Affichage détaillé
-        for binding in all_bindings:
-            principal = binding.get('principal', 'N/A')
-            role = binding.get('role_name', 'N/A')
-            crn = binding.get('crn_pattern', 'N/A')
-            resource_type = "topic" if "/topic=" in crn else "consumer-group" if "/consumer-group=" in crn else "unknown"
-            print(f"   • {principal} → {role} ({resource_type})")
-
-        return all_bindings
-
-    def cleanup_tenant_project(
-        self,
-        tenant_project: Union[str, TenantProject],
-        cluster_id: str,
-        env_id: str,
-        org_id: str
-    ) -> int:
-        """Supprimer tous les role bindings d'un projet tenant"""
-        if isinstance(tenant_project, str):
-            tenant_project = TenantProject.from_string(tenant_project)
-
-        print(f"🗑️  Cleanup du projet tenant: {tenant_project.full_name}")
-
-        # Récupérer tous les bindings
-        bindings = self.list_tenant_role_bindings(tenant_project, cluster_id, env_id, org_id)
-
-        deleted_count = 0
-        for binding in bindings:
-            binding_id = binding.get('id')
-            if binding_id:
-                if self._delete_role_binding(binding_id):
-                    deleted_count += 1
-
-        print(f"✅ Cleanup terminé: {deleted_count}/{len(bindings)} role binding(s) supprimé(s)")
-        return deleted_count
-
-    def _map_tenant_role_to_confluent(self, tenant_role: TenantRole, resource_type: str) -> str:
-        """Mapper les rôles tenant vers les rôles Confluent standard"""
-
-        # Mapping selon le type de ressource et le rôle
-        mappings = {
-            TenantRole.OWNER: {
-                "topic": "DeveloperWrite",      # Peut créer/modifier/supprimer topics
-                "consumer-group": "DeveloperRead",  # Peut lire consumer groups
-                "cluster": "CloudClusterAdmin"   # Admin complet du cluster
-            },
-            TenantRole.ADMIN: {
-                "topic": "DeveloperWrite",
-                "consumer-group": "DeveloperRead",
-                "cluster": "DeveloperManage"
-            },
-            TenantRole.DEVELOPER: {
-                "topic": "DeveloperWrite",
-                "consumer-group": "DeveloperRead",
-                "cluster": "DeveloperManage"
-            },
-            TenantRole.PRODUCER: {
-                "topic": "DeveloperWrite",
-                "consumer-group": "DeveloperRead",
-                "cluster": "DeveloperManage"
-            },
-            TenantRole.CONSUMER: {
-                "topic": "DeveloperRead",
-                "consumer-group": "DeveloperRead",
-                "cluster": "DeveloperRead"
-            },
-            TenantRole.READER: {
-                "topic": "DeveloperRead",
-                "consumer-group": "DeveloperRead",
-                "cluster": "DeveloperRead"
-            }
-        }
-
-        return mappings.get(tenant_role, {}).get(resource_type, "DeveloperRead")
-
-    def _build_tenant_crn(
-        self,
-        tenant_project: TenantProject,
-        resource_type: str,
-        cluster_id: str,
-        env_id: str,
-        org_id: str
-    ) -> str:
-        """Construire le CRN pour un tenant selon le type de ressource"""
-
-        base_crn = f"crn://confluent.cloud/organization={org_id}/environment={env_id}/cloud-cluster={cluster_id}/kafka={cluster_id}"
-
-        if resource_type == "topic":
-            return f"{base_crn}/topic={tenant_project.topic_prefix}"
-        elif resource_type == "consumer-group":
-            return f"{base_crn}/consumer-group={tenant_project.consumer_group_prefix}"
-        elif resource_type == "cluster":
-            return f"crn://confluent.cloud/organization={org_id}/environment={env_id}/cloud-cluster={cluster_id}"
-        else:
-            raise ValueError(f"Type de ressource non supporté: {resource_type}")
-
-    # Méthodes de base (reprises de ConfluentRoleBindingManager)
-    def _create_role_binding(self, principal: str, role_name: str, crn_pattern: str, disable_wait_for_ready: bool = False) -> Dict:
-        """Créer un role binding (méthode interne)"""
         payload = {
             "principal": principal,
             "role_name": role_name,
             "crn_pattern": crn_pattern
         }
-
+        
+        print(f"🔄 Création du role binding...")
+        print(f"   Principal: {principal}")
+        print(f"   Role: {role_name}")
+        print(f"   CRN: {crn_pattern}")
+        
         try:
             response = requests.post(
                 f"{self.base_url}/iam/v2/role-bindings",
@@ -351,36 +52,65 @@ class ConfluentTenantManager:
                 auth=self.auth,
                 headers=self.headers
             )
-
+            
             if response.status_code == 201:
                 role_binding = response.json()
                 binding_id = role_binding.get('id')
-                print(f"   ✅ Role binding créé: {binding_id}")
-
+                print(f"✅ Role binding créé avec succès: {binding_id}")
+                
+                # Attendre la propagation si demandé (comportement Terraform par défaut)
                 if not disable_wait_for_ready:
-                    print(f"   ⏳ Attente propagation...")
-                    time.sleep(2)  # Attente réduite pour les opérations bulk
-
+                    print(f"⏳ Attente de la propagation (90s)...")
+                    self._wait_for_ready(binding_id, timeout=90)
+                
                 return role_binding
             else:
-                error_msg = f"Erreur création: {response.status_code} - {response.text}"
-                print(f"   ❌ {error_msg}")
+                error_msg = f"Erreur lors de la création: {response.status_code} - {response.text}"
+                print(f"❌ {error_msg}")
                 raise Exception(error_msg)
-
+                
         except Exception as e:
-            print(f"   💥 Erreur: {e}")
+            print(f"💥 Erreur: {e}")
             raise
-
-    def _list_role_bindings(self, principal: Optional[str] = None, role_name: Optional[str] = None, crn_pattern: Optional[str] = None) -> List[Dict]:
-        """Lister les role bindings avec filtres"""
+    
+    def get_role_binding(self, binding_id: str) -> Optional[Dict]:
+        """Récupérer un role binding par ID"""
+        try:
+            response = requests.get(
+                f"{self.base_url}/iam/v2/role-bindings/{binding_id}",
+                auth=self.auth,
+                headers=self.headers
+            )
+            
+            if response.status_code == 200:
+                return response.json()
+            elif response.status_code == 404:
+                return None
+            else:
+                raise Exception(f"Erreur API: {response.status_code} - {response.text}")
+                
+        except Exception as e:
+            print(f"Erreur lors de la récupération: {e}")
+            return None
+    
+    def list_role_bindings(
+        self, 
+        principal: Optional[str] = None,
+        role_name: Optional[str] = None,
+        crn_pattern: Optional[str] = None
+    ) -> List[Dict]:
+        """
+        Lister les role bindings avec filtres optionnels
+        (Équivalent du data source terraform)
+        """
         params = {}
         if principal:
             params['principal'] = principal
         if role_name:
-            params['role_name'] = role_name
+            params['role_name'] = role_name  
         if crn_pattern:
             params['crn_pattern'] = crn_pattern
-
+        
         try:
             response = requests.get(
                 f"{self.base_url}/iam/v2/role-bindings",
@@ -388,17 +118,19 @@ class ConfluentTenantManager:
                 auth=self.auth,
                 headers=self.headers
             )
-
+            
             if response.status_code == 200:
                 data = response.json()
                 return data.get('data', [])
             else:
+                print(f"Erreur lors de la liste: {response.status_code} - {response.text}")
                 return []
-
-        except Exception:
+                
+        except Exception as e:
+            print(f"Erreur: {e}")
             return []
-
-    def _delete_role_binding(self, binding_id: str) -> bool:
+    
+    def delete_role_binding(self, binding_id: str) -> bool:
         """Supprimer un role binding"""
         try:
             response = requests.delete(
@@ -406,79 +138,244 @@ class ConfluentTenantManager:
                 auth=self.auth,
                 headers=self.headers
             )
-
+            
             if response.status_code == 204:
-                print(f"   ✅ Supprimé: {binding_id}")
+                print(f"✅ Role binding {binding_id} supprimé avec succès")
                 return True
             else:
-                print(f"   ❌ Erreur suppression {binding_id}: {response.status_code}")
+                print(f"❌ Erreur lors de la suppression: {response.status_code} - {response.text}")
                 return False
-
+                
         except Exception as e:
-            print(f"   💥 Erreur: {e}")
+            print(f"Erreur: {e}")
             return False
+    
+    def _wait_for_ready(self, binding_id: str, timeout: int = 90):
+        """Attendre que le role binding soit propagé (comme Terraform)"""
+        start_time = time.time()
+        
+        while time.time() - start_time < timeout:
+            binding = self.get_role_binding(binding_id)
+            if binding:
+                # En théorie, on pourrait vérifier un statut, mais l'API ne l'expose pas
+                # Terraform fait juste une attente fixe de 90s
+                time.sleep(5)
+                break
+            time.sleep(2)
+        
+        elapsed = time.time() - start_time
+        print(f"✅ Propagation terminée après {elapsed:.1f}s")
 
-# Exemple d'utilisation
-def example_tenant_usage():
-    """Exemple d'utilisation du gestionnaire de tenants"""
+class ConfluentResourceHelper:
+    """Helper pour construire les CRN patterns comme dans Terraform"""
+    
+    @staticmethod
+    def organization_crn(org_id: str) -> str:
+        """CRN pour l'organisation entière"""
+        return f"crn://confluent.cloud/organization={org_id}"
+    
+    @staticmethod
+    def environment_crn(org_id: str, env_id: str) -> str:
+        """CRN pour un environnement spécifique"""
+        return f"crn://confluent.cloud/organization={org_id}/environment={env_id}"
+    
+    @staticmethod
+    def kafka_cluster_crn(org_id: str, env_id: str, cluster_id: str) -> str:
+        """CRN pour un cluster Kafka spécifique"""
+        return f"crn://confluent.cloud/organization={org_id}/environment={env_id}/cloud-cluster={cluster_id}"
+    
+    @staticmethod
+    def kafka_topic_crn(org_id: str, env_id: str, cluster_id: str, topic_name: str = "*") -> str:
+        """CRN pour un/des topic(s) Kafka"""
+        return f"crn://confluent.cloud/organization={org_id}/environment={env_id}/cloud-cluster={cluster_id}/kafka={cluster_id}/topic={topic_name}"
+    
+    @staticmethod
+    def kafka_consumer_group_crn(org_id: str, env_id: str, cluster_id: str, consumer_group: str = "*") -> str:
+        """CRN pour un/des consumer group(s) Kafka"""
+        return f"crn://confluent.cloud/organization={org_id}/environment={env_id}/cloud-cluster={cluster_id}/kafka={cluster_id}/group={consumer_group}"
+    
+    @staticmethod
+    def kafka_transactional_id_crn(org_id: str, env_id: str, cluster_id: str, transactional_id: str = "*") -> str:
+        """CRN pour un/des transactional ID(s) Kafka"""
+        return f"crn://confluent.cloud/organization={org_id}/environment={env_id}/cloud-cluster={cluster_id}/kafka={cluster_id}/transactional-id={transactional_id}"
 
-    # Configuration
-    manager = ConfluentTenantManager(
-        api_key=API_KEY,
-        api_secret=API_SECRET
+# Exemples d'utilisation (inspirés des exemples Terraform)
+def example_usage():
+    """Exemples d'utilisation inspirés des configurations Terraform avec focus Consumer Groups"""
+    
+    # Initialisation
+    manager = ConfluentRoleBindingManager(
+        api_key="VOTRE_API_KEY",
+        api_secret="VOTRE_API_SECRET"
     )
-
-
-
-    # IDs de votre infrastructure
-    org_id = ""
-    env_id = ""
-    cluster_id = ""
-
-    owner_principal = ""
-    user_id = ""
-
-
-    print("=== GESTION DE PROJETS TENANTS ===\n")
-
-    # 1. Créer un projet tenant
-    project = TenantProject("taas", "cagip", "projet1")
-    print(f"📁 Projet: {project.full_name}")
-    print(f"   Topics prefix: {project.topic_prefix}")
-    print(f"   Consumer groups prefix: {project.consumer_group_prefix}")
-
-    # 2. Setup complet du projet
+    
+    # IDs de vos ressources (à adapter selon votre environnement)
+    org_id = "1111aaaa-11aa-11aa-11aa-111111aaaaaa"
+    env_id = "env-aaa1111"
+    cluster_id = "lkc-1111aaa"
+    service_account_id = "sa-111aaa"
+    user_id = "u-111aaa"
+    
+    helper = ConfluentResourceHelper()
+    
+    print("=== ROLE BINDINGS POUR KAFKA COMPLET (TOPICS + CONSUMER GROUPS) ===\n")
+    
+    # Configuration pour un développeur complet (Read + Write + Consumer Groups)
+    print("🚀 CONFIGURATION DÉVELOPPEUR COMPLET")
+    print("="*50)
+    
     try:
-        bindings = manager.setup_tenant_project(
-            tenant_project=project,
-            owner_principal=f"User:{owner_principal}",
-            cluster_id=cluster_id,
-            env_id=env_id,
-            org_id=org_id,
-            additional_principals=[
-                {
-                    "principal": f"User:{owner_principal}",
-                    "role": TenantRole.DEVELOPER,
-                    "resources": ["topic"]
-                },
-                {
-                    "principal": f"User:{owner_principal}",
-                    "role": TenantRole.READER,
-                    "resources": ["topic"]
-                }
-            ]
+        # 1. DeveloperWrite pour les topics
+        print("\n1. 📝 DeveloperWrite pour les topics")
+        topic_write_binding = manager.create_role_binding(
+            principal=f"User:{service_account_id}",
+            role_name="DeveloperWrite",
+            crn_pattern=helper.kafka_topic_crn(org_id, env_id, cluster_id, "*")
         )
-
-
-        print(f"\n🎉 Projet configuré avec {len(bindings)} role bindings")
-
+        print(f"   ✅ Topic Write: {topic_write_binding.get('id')}")
+        
+        # 2. DeveloperRead pour les topics  
+        print("\n2. 📖 DeveloperRead pour les topics")
+        topic_read_binding = manager.create_role_binding(
+            principal=f"User:{service_account_id}",
+            role_name="DeveloperRead",
+            crn_pattern=helper.kafka_topic_crn(org_id, env_id, cluster_id, "*")
+        )
+        print(f"   ✅ Topic Read: {topic_read_binding.get('id')}")
+        
+        # 3. DeveloperRead pour les consumer groups (NOUVEAU !)
+        print("\n3. 👥 DeveloperRead pour les consumer groups")
+        consumer_group_binding = manager.create_role_binding(
+            principal=f"User:{service_account_id}",
+            role_name="DeveloperRead", 
+            crn_pattern=helper.kafka_consumer_group_crn(org_id, env_id, cluster_id, "*")
+        )
+        print(f"   ✅ Consumer Groups: {consumer_group_binding.get('id')}")
+        
+        # 4. (Optionnel) DeveloperWrite pour les transactional IDs si nécessaire
+        print("\n4. 🔄 DeveloperWrite pour les transactional IDs (optionnel)")
+        tx_id_binding = manager.create_role_binding(
+            principal=f"User:{service_account_id}",
+            role_name="DeveloperWrite",
+            crn_pattern=helper.kafka_transactional_id_crn(org_id, env_id, cluster_id, "*")
+        )
+        print(f"   ✅ Transactional IDs: {tx_id_binding.get('id')}")
+        
     except Exception as e:
-        print(f"❌ Erreur setup: {e}")
+        print(f"❌ Erreur lors de la création: {e}")
+    
+    print("\n" + "="*60 + "\n")
+    
+    # Vérification des permissions créées
+    print("🔍 VÉRIFICATION DES PERMISSIONS")
+    print("-"*40)
+    
+    bindings = manager.list_role_bindings(principal=f"User:{service_account_id}")
+    print(f"Total role bindings pour {service_account_id}: {len(bindings)}")
+    
+    # Grouper par type de ressource
+    topic_bindings = []
+    consumer_group_bindings = []
+    tx_id_bindings = []
+    other_bindings = []
+    
+    for binding in bindings:
+        crn = binding.get('crn_pattern', '')
+        role = binding.get('role_name', '')
+        
+        if '/topic=' in crn:
+            topic_bindings.append(f"{role} sur topics")
+        elif '/group=' in crn:
+            consumer_group_bindings.append(f"{role} sur consumer groups")
+        elif '/transactional-id=' in crn:
+            tx_id_bindings.append(f"{role} sur transactional IDs")
+        else:
+            other_bindings.append(f"{role} sur {crn}")
+    
+    print(f"\n📊 Répartition des permissions:")
+    print(f"   Topics: {len(topic_bindings)} ({', '.join(topic_bindings)})")
+    print(f"   Consumer Groups: {len(consumer_group_bindings)} ({', '.join(consumer_group_bindings)})")
+    print(f"   Transactional IDs: {len(tx_id_bindings)} ({', '.join(tx_id_bindings)})")
+    print(f"   Autres: {len(other_bindings)}")
+    
+    # Résumé pour le développeur
+    print(f"\n🎯 RÉSUMÉ POUR LE DÉVELOPPEUR:")
+    print(f"Avec ces permissions, le service account {service_account_id} peut:")
+    if topic_bindings:
+        if any('Write' in b for b in topic_bindings):
+            print(f"   ✅ Produire des messages vers tous les topics")
+        if any('Read' in b for b in topic_bindings):
+            print(f"   ✅ Lire des messages depuis tous les topics")
+    
+    if consumer_group_bindings:
+        print(f"   ✅ Rejoindre et utiliser tous les consumer groups")
+    else:
+        print(f"   ⚠️  MANQUE: Permissions consumer groups (d'où votre erreur!)")
+    
+    if tx_id_bindings:
+        print(f"   ✅ Utiliser les transactions Kafka")
+    
+    print(f"\n✅ Configuration terminée!")
 
-    # 3. Lister les role bindings du projet
-    print(f"\n" + "="*60)
-    manager.list_tenant_role_bindings(project, cluster_id, env_id, org_id)
-
+def fix_consumer_group_permissions():
+    """Script spécifique pour résoudre le problème des consumer groups"""
+    
+    manager = ConfluentRoleBindingManager(
+        api_key="VOTRE_API_KEY",
+        api_secret="VOTRE_API_SECRET"
+    )
+    
+    # IDs de vos ressources (REMPLACEZ par vos vrais IDs)
+    org_id = "VOTRE_ORG_ID"  # Format: 1111aaaa-11aa-11aa-11aa-111111aaaaaa
+    env_id = "VOTRE_ENV_ID"   # Format: env-aaa1111
+    cluster_id = "VOTRE_CLUSTER_ID"  # Format: lkc-1111aaa
+    service_account_id = "VOTRE_SA_ID"  # Format: sa-111aaa
+    
+    helper = ConfluentResourceHelper()
+    
+    print("=== RÉSOLUTION DU PROBLÈME CONSUMER GROUPS ===\n")
+    
+    print("🎯 Problème identifié:")
+    print('   "No role DeveloperRead for ressource type ConsumerGroup"')
+    print("   → Il manque les permissions pour les consumer groups\n")
+    
+    print("💡 Solution:")
+    print("   Ajouter un role binding DeveloperRead pour les consumer groups\n")
+    
+    try:
+        # Créer le role binding manquant pour les consumer groups
+        consumer_group_crn = helper.kafka_consumer_group_crn(org_id, env_id, cluster_id, "*")
+        
+        print(f"🔧 Création du role binding pour consumer groups...")
+        print(f"   Principal: User:{service_account_id}")
+        print(f"   Role: DeveloperRead")
+        print(f"   CRN: {consumer_group_crn}")
+        
+        binding = manager.create_role_binding(
+            principal=f"User:{service_account_id}",
+            role_name="DeveloperRead",
+            crn_pattern=consumer_group_crn
+        )
+        
+        print(f"\n✅ Role binding créé avec succès!")
+        print(f"   ID: {binding.get('id')}")
+        print(f"   Votre application peut maintenant utiliser les consumer groups!")
+        
+    except Exception as e:
+        print(f"❌ Erreur: {e}")
+        print(f"\n🔍 Vérifiez:")
+        print(f"   - Vos IDs sont corrects (org_id, env_id, cluster_id, service_account_id)")
+        print(f"   - Votre API key a les permissions pour créer des role bindings")
+        print(f"   - Le service account existe bien")
 
 if __name__ == "__main__":
-    example_tenant_usage()
+    print("Choisissez une option:")
+    print("1. Exemples complets (topics + consumer groups)")
+    print("2. Résolution rapide du problème consumer groups")
+    
+    choice = input("\nVotre choix (1 ou 2): ").strip()
+    
+    if choice == "2":
+        fix_consumer_group_permissions()
+    else:
+        example_usage()
