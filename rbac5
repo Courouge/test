@@ -1,0 +1,199 @@
+import requests
+from requests.auth import HTTPBasicAuth
+import json
+
+def test_your_specific_case():
+    """Test votre cas spécifique en utilisant les patterns Terraform"""
+    
+    api_key = "VOTRE_API_KEY"
+    api_secret = "VOTRE_API_SECRET"
+    
+    base_url = "https://api.confluent.cloud"
+    auth = HTTPBasicAuth(api_key, api_secret)
+    headers = {'Accept': 'application/json'}
+    
+    print("=== TEST DE VOTRE CAS SPÉCIFIQUE ===\n")
+    
+    # Vos paramètres originaux
+    original_params = {
+        "principal": "User:u-111aaa",
+        "role_name": "CloudClusterAdmin",
+        "crn_pattern": "crn://confluent.cloud/organization=1111aaaa-11aa-11aa-11aa-111111aaaaaa/environment=env-aaa1111/cloud-cluster=lkc-1111aaa"
+    }
+    
+    print("1. 🧪 Test avec vos paramètres originaux")
+    print(f"   Paramètres: {json.dumps(original_params, indent=4)}")
+    
+    # Test 1: GET direct (comme vous faisiez)
+    response = requests.get(
+        f"{base_url}/iam/v2/role-bindings",
+        params=original_params,
+        auth=auth,
+        headers=headers
+    )
+    
+    print(f"\n   Status GET: {response.status_code}")
+    print(f"   URL: {response.url}")
+    
+    if response.status_code == 200:
+        try:
+            data = response.json()
+            results = data.get('data', [])
+            print(f"   ✅ Résultats: {len(results)}")
+            
+            for result in results:
+                print(f"      - {result.get('principal')} → {result.get('role_name')}")
+        except:
+            print(f"   Réponse: {response.text[:200]}...")
+    else:
+        print(f"   ❌ Erreur: {response.text[:200]}...")
+    
+    print("\n" + "-"*60 + "\n")
+    
+    # Test 2: Patterns alternatifs inspirés de Terraform
+    print("2. 🔍 Test avec patterns alternatifs (style Terraform)")
+    
+    alternative_patterns = [
+        # Pattern plus simple (wildcard)
+        "crn://confluent.cloud/organization=*/environment=env-aaa1111/cloud-cluster=lkc-1111aaa",
+        
+        # Pattern sans organisation spécifique
+        "crn://confluent.cloud/**/environment=env-aaa1111/cloud-cluster=lkc-1111aaa",
+        
+        # Pattern très simple
+        "*env-aaa1111*cloud-cluster=lkc-1111aaa*",
+        
+        # Pattern minimal
+        "*lkc-1111aaa*"
+    ]
+    
+    for i, pattern in enumerate(alternative_patterns, 1):
+        print(f"\n   Test {i}: {pattern}")
+        
+        test_params = {
+            "principal": "User:u-111aaa",
+            "role_name": "CloudClusterAdmin",
+            "crn_pattern": pattern
+        }
+        
+        response = requests.get(
+            f"{base_url}/iam/v2/role-bindings",
+            params=test_params,
+            auth=auth,
+            headers=headers
+        )
+        
+        print(f"      Status: {response.status_code}")
+        
+        if response.status_code == 200:
+            try:
+                data = response.json()
+                count = len(data.get('data', []))
+                print(f"      ✅ Résultats: {count}")
+                
+                if count > 0:
+                    print(f"      🎯 SUCCÈS avec ce pattern!")
+                    break
+            except:
+                print(f"      Erreur JSON")
+        else:
+            print(f"      ❌ {response.text[:100]}...")
+    
+    print("\n" + "-"*60 + "\n")
+    
+    # Test 3: Création d'un role binding (style Terraform)
+    print("3. 🔨 Test de création d'un role binding")
+    
+    # D'abord, récupérer les vrais IDs
+    print("\n   📋 Récupération des vrais IDs...")
+    
+    # Utilisateurs
+    users_response = requests.get(f"{base_url}/iam/v2/users", auth=auth, headers=headers)
+    real_user_id = None
+    if users_response.status_code == 200:
+        users = users_response.json().get('data', [])
+        if users:
+            real_user_id = users[0].get('id')
+            print(f"      Vrai User ID: {real_user_id}")
+    
+    # Environnements
+    env_response = requests.get(f"{base_url}/org/v2/environments", auth=auth, headers=headers)
+    real_env_id = None
+    if env_response.status_code == 200:
+        envs = env_response.json().get('data', [])
+        if envs:
+            real_env_id = envs[0].get('id')
+            print(f"      Vrai Env ID: {real_env_id}")
+    
+    # Clusters dans le premier environnement
+    real_cluster_id = None
+    if real_env_id:
+        cluster_response = requests.get(
+            f"{base_url}/cmk/v2/clusters?environment={real_env_id}",
+            auth=auth, headers=headers
+        )
+        if cluster_response.status_code == 200:
+            try:
+                cluster_data = cluster_response.json()
+                if cluster_data and 'data' in cluster_data:
+                    clusters = cluster_data['data']
+                    if clusters:
+                        real_cluster_id = clusters[0].get('id')
+                        print(f"      Vrai Cluster ID: {real_cluster_id}")
+            except:
+                pass
+    
+    # Test avec les vrais IDs si on les a trouvés
+    if real_user_id and real_env_id and real_cluster_id:
+        print(f"\n   🎯 Test avec les VRAIS IDs:")
+        
+        # Construction du CRN réel (on ne connaît pas l'org ID exact)
+        real_crn_patterns = [
+            f"crn://confluent.cloud/organization=*/environment={real_env_id}/cloud-cluster={real_cluster_id}",
+            f"*environment={real_env_id}*cloud-cluster={real_cluster_id}*"
+        ]
+        
+        for pattern in real_crn_patterns:
+            print(f"\n      Test pattern: {pattern}")
+            
+            test_params = {
+                "principal": f"User:{real_user_id}",
+                "role_name": "CloudClusterAdmin",
+                "crn_pattern": pattern
+            }
+            
+            response = requests.get(
+                f"{base_url}/iam/v2/role-bindings",
+                params=test_params,
+                auth=auth,
+                headers=headers
+            )
+            
+            print(f"         Status: {response.status_code}")
+            
+            if response.status_code == 200:
+                try:
+                    data = response.json()
+                    count = len(data.get('data', []))
+                    print(f"         ✅ Résultats: {count}")
+                    
+                    if count > 0:
+                        print(f"         🏆 TROUVÉ avec les vrais IDs!")
+                        for result in data.get('data', []):
+                            print(f"            • {result.get('principal')} → {result.get('role_name')}")
+                            print(f"            • CRN: {result.get('crn_pattern')}")
+                        break
+                except:
+                    pass
+    else:
+        print("      ⚠️  Impossible de récupérer les vrais IDs")
+    
+    print(f"\n{'='*60}")
+    print("📝 RECOMMANDATIONS:")
+    print("1. Utilisez les VRAIS IDs de votre compte (u-xxxxx, env-xxxxx, lkc-xxxxx)")
+    print("2. Essayez des patterns CRN plus simples avec des wildcards (*)")
+    print("3. Vérifiez que votre API key a les permissions RBAC nécessaires")
+    print("4. Utilisez la méthode POST pour créer de nouveaux role bindings")
+
+if __name__ == "__main__":
+    test_your_specific_case()
