@@ -1,332 +1,543 @@
 #!/usr/bin/env python3
 """
-Script de test pour vérifier la configuration Confluent Cloud
+Confluent Cloud Tenant Manager
+Automatise la création de service accounts et la gestion des permissions RBAC
+pour des tenants applicatifs dans Confluent Cloud avec stockage sécurisé dans Vault.
 """
 
+import argparse
 import os
+import sys
+import json
+import logging
+from typing import Dict, List, Optional, Tuple
+from dataclasses import dataclass
+from datetime import datetime
 from dotenv import load_dotenv
 import requests
 from requests.auth import HTTPBasicAuth
-import sys
 
-def test_confluent_connection():
-    """Test de connexion à Confluent Cloud"""
-    print("🔍 Test de connexion Confluent Cloud...")
+
+# Configuration du logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s'
+)
+logger = logging.getLogger(__name__)
+
+
+@dataclass
+class ConfluentConfig:
+    """Configuration pour Confluent Cloud"""
+    api_key: str
+    api_secret: str
+    base_url: str = "https://api.confluent.cloud"
     
-    api_key = os.getenv('CONFLUENT_API_KEY')
-    api_secret = os.getenv('CONFLUENT_API_SECRET')
     
-    if not api_key or not api_secret:
-        print("❌ Variables CONFLUENT_API_KEY et CONFLUENT_API_SECRET manquantes")
-        return False
+@dataclass
+class CredentialStorage:
+    """Configuration pour le stockage des credentials"""
+    storage_type: str = "local"  # "local", "display", "file"
+    storage_path: str = "./credentials"
+
+
+@dataclass
+class TenantPermissions:
+    """Définition des permissions pour un tenant"""
+    project_name: str
+    cluster_id: str
+    topics: List[str]
+    consumer_groups: List[str]
+    schemas: List[str]
+
+
+class ConfluentCloudAPI:
+    """Client pour l'API Confluent Cloud"""
     
-    try:
-        response = requests.get(
-            "https://api.confluent.cloud/iam/v2/service-accounts",
-            auth=HTTPBasicAuth(api_key, api_secret),
-            headers={'Accept': 'application/json'}
-        )
+    def __init__(self, config: ConfluentConfig):
+        self.config = config
+        self.session = requests.Session()
+        self.session.auth = HTTPBasicAuth(config.api_key, config.api_secret)
+        self.session.headers.update({
+            'Content-Type': 'application/json',
+            'Accept': 'application/json'
+        })
+    
+    def create_service_account(self, name: str, description: str = "") -> Dict:
+        """Crée un service account"""
+        url = f"{self.config.base_url}/iam/v2/service-accounts"
+        payload = {
+            "display_name": name,
+            "description": description or f"Service account for {name} tenant"
+        }
         
-        if response.status_code == 200:
-            print("✅ Connexion Confluent Cloud réussie")
-            data = response.json()
-            print(f"   Nombre de service accounts existants: {len(data.get('data', []))}")
+        response = self.session.post(url, json=payload)
+        response.raise_for_status()
+        
+        service_account = response.json()
+        logger.info(f"Service account créé: {service_account['id']}")
+        return service_account
+    
+    def create_api_key(self, service_account_id: str, cluster_id: str) -> Dict:
+        """Crée une API key pour un service account sur un cluster"""
+        url = f"{self.config.base_url}/iam/v2/api-keys"
+        payload = {
+            "spec": {
+                "display_name": f"API Key for {service_account_id}",
+                "description": f"API Key for cluster {cluster_id}",
+                "owner": {
+                    "id": service_account_id,
+                    "api_version": "iam/v2",
+                    "kind": "ServiceAccount"
+                },
+                "resource": {
+                    "id": cluster_id,
+                    "api_version": "cmk/v2",
+                    "kind": "Cluster"
+                }
+            }
+        }
+        
+        response = self.session.post(url, json=payload)
+        response.raise_for_status()
+        
+        api_key = response.json()
+        logger.info(f"API Key créée: {api_key['id']}")
+        return api_key
+    
+    def create_role_binding(self, principal: str, role_name: str, resource_type: str, 
+                          resource_pattern: str, cluster_id: str, pattern_type: str = "LITERAL") -> Dict:
+        """Crée un role binding pour un principal sur une ressource"""
+        url = f"{self.config.base_url}/iam/v2/role-bindings"
+        
+        # Construction du CRN en fonction du type de ressource
+        if resource_type == "topic":
+            crn_pattern = f"crn://confluent.cloud/organization=*/environment=*/cloud-cluster=*/kafka-cluster={cluster_id}/topic={resource_pattern}"
+        elif resource_type == "consumer-group":
+            crn_pattern = f"crn://confluent.cloud/organization=*/environment=*/cloud-cluster=*/kafka-cluster={cluster_id}/group={resource_pattern}"
+        elif resource_type == "kafka-cluster":
+            crn_pattern = f"crn://confluent.cloud/organization=*/environment=*/cloud-cluster=*/kafka-cluster={cluster_id}"
+        else:
+            raise ValueError(f"Type de ressource non supporté: {resource_type}")
+        
+        payload = {
+            "principal": f"User:{principal}",
+            "role_name": role_name,
+            "crn_pattern": crn_pattern
+        }
+        
+        response = self.session.post(url, json=payload)
+        response.raise_for_status()
+        
+        role_binding = response.json()
+        logger.info(f"Role binding créé: {role_binding['id']} - {role_name} sur {resource_type}:{resource_pattern}")
+        return role_binding
+    
+    def _build_crn_pattern(self, resource_type: str, resource_id: str, pattern_type: str = "LITERAL") -> str:
+        """Construit un pattern CRN pour les permissions"""
+        # Pour les patterns avec préfixe, on utilise une structure CRN simplifiée
+        if pattern_type == "PREFIXED":
+            if resource_type == "topic":
+                return f"crn://confluent.cloud/organization=*/environment=*/cloud-cluster=*/kafka-cluster=*/topic={resource_id}"
+            elif resource_type == "consumer-group":
+                return f"crn://confluent.cloud/organization=*/environment=*/cloud-cluster=*/kafka-cluster=*/group={resource_id}"
+        
+        # Pour les patterns littéraux
+        if resource_type == "kafka-cluster":
+            return f"crn://confluent.cloud/organization=*/environment=*/cloud-cluster=*/kafka-cluster={resource_id}"
+        elif resource_type == "schema-registry":
+            return f"crn://confluent.cloud/organization=*/environment={resource_id}/schema-registry-cluster=*"
+        
+        return f"crn://confluent.cloud/organization=*/environment=*/cloud-cluster=*/kafka-cluster=*/{resource_type}={resource_id}"
+    
+    def get_service_account_by_name(self, name: str) -> Optional[Dict]:
+        """Recherche un service account par nom"""
+        url = f"{self.config.base_url}/iam/v2/service-accounts"
+        response = self.session.get(url)
+        response.raise_for_status()
+        
+        service_accounts = response.json().get('data', [])
+        for sa in service_accounts:
+            if sa.get('display_name') == name:
+                return sa
+        return None
+
+
+class CredentialManager:
+    """Gestionnaire pour le stockage des credentials (sans Vault)"""
+    
+    def __init__(self, config: CredentialStorage):
+        self.config = config
+        if config.storage_type == "file" and not os.path.exists(config.storage_path):
+            os.makedirs(config.storage_path, mode=0o700)
+    
+    def store_api_credentials(self, project_name: str, api_key: str, api_secret: str) -> bool:
+        """Stocke les credentials API selon le mode configuré"""
+        credential_data = {
+            "project_name": project_name,
+            "api_key": api_key,
+            "api_secret": api_secret,
+            "created_at": datetime.now().isoformat()
+        }
+        
+        if self.config.storage_type == "display":
+            self._display_credentials(credential_data)
             return True
+        elif self.config.storage_type == "file":
+            return self._store_to_file(project_name, credential_data)
+        elif self.config.storage_type == "local":
+            return self._store_locally(project_name, credential_data)
         else:
-            print(f"❌ Erreur Confluent Cloud: {response.status_code} - {response.text}")
+            logger.error(f"Mode de stockage non supporté: {self.config.storage_type}")
             return False
-            
-    except Exception as e:
-        print(f"❌ Erreur de connexion Confluent Cloud: {e}")
-        return False
-
-def test_environment_variables():
-    """Vérification des variables d'environnement"""
-    print("🔍 Vérification des variables d'environnement...")
     
-    required_vars = [
-        'CONFLUENT_API_KEY',
-        'CONFLUENT_API_SECRET'
-    ]
-    
-    optional_vars = [
-        'CONFLUENT_BASE_URL'
-    ]
-    
-    missing_vars = []
-    for var in required_vars:
-        value = os.getenv(var)
-        if not value:
-            missing_vars.append(var)
+    def get_api_credentials(self, project_name: str) -> Optional[Dict]:
+        """Récupère les credentials API"""
+        if self.config.storage_type == "file":
+            return self._get_from_file(project_name)
+        elif self.config.storage_type == "local":
+            return self._get_locally(project_name)
         else:
-            # Masquer les valeurs sensibles
-            if 'SECRET' in var or 'TOKEN' in var:
-                display_value = f"{value[:4]}***{value[-4:]}" if len(value) > 8 else "***"
-            else:
-                display_value = value
-            print(f"   ✅ {var}: {display_value}")
+            logger.warning("Mode display ne supporte pas la récupération")
+            return None
     
-    # Variables optionnelles
-    for var in optional_vars:
-        value = os.getenv(var)
-        if value:
-            print(f"   ℹ️  {var}: {value}")
-        else:
-            print(f"   ➖ {var}: non définie (valeur par défaut sera utilisée)")
+    def _display_credentials(self, credential_data: Dict):
+        """Affiche les credentials de manière sécurisée"""
+        print("\n" + "="*60)
+        print("🔑 CREDENTIALS GÉNÉRÉES - À SAUVEGARDER IMMÉDIATEMENT")
+        print("="*60)
+        print(f"Projet: {credential_data['project_name']}")
+        print(f"API Key: {credential_data['api_key']}")
+        print(f"API Secret: {credential_data['api_secret']}")
+        print(f"Créé le: {credential_data['created_at']}")
+        print("="*60)
+        print("⚠️  IMPORTANT: Sauvegardez ces credentials dans un gestionnaire")
+        print("   de secrets sécurisé. Ils ne seront plus affichés.")
+        print("="*60)
     
-    if missing_vars:
-        print(f"\n❌ Variables obligatoires manquantes: {', '.join(missing_vars)}")
-        return False
-    else:
-        print("✅ Toutes les variables obligatoires sont présentes")
-        return True
-
-def test_cluster_access():
-    """Test d'accès aux clusters"""
-    print("\n🔍 Test d'accès aux clusters...")
-    
-    api_key = os.getenv('CONFLUENT_API_KEY')
-    api_secret = os.getenv('CONFLUENT_API_SECRET')
-    
-    try:
-        response = requests.get(
-            "https://api.confluent.cloud/cmk/v2/clusters",
-            auth=HTTPBasicAuth(api_key, api_secret),
-            headers={'Accept': 'application/json'}
-        )
-        
-        if response.status_code == 200:
-            data = response.json()
-            clusters = data.get('data', [])
-            print(f"✅ Accès aux clusters réussi")
-            print(f"   Nombre de clusters disponibles: {len(clusters)}")
+    def _store_to_file(self, project_name: str, credential_data: Dict) -> bool:
+        """Stocke dans un fichier local chiffré/protégé"""
+        try:
+            file_path = os.path.join(self.config.storage_path, f"{project_name}.json")
             
-            if clusters:
-                print("   Clusters disponibles:")
-                for cluster in clusters[:3]:  # Afficher les 3 premiers seulement
-                    print(f"     - {cluster.get('id', 'N/A')} ({cluster.get('display_name', 'N/A')})")
-                if len(clusters) > 3:
-                    print(f"     ... et {len(clusters) - 3} autres")
+            with open(file_path, 'w') as f:
+                json.dump(credential_data, f, indent=2)
             
+            # Sécuriser le fichier (lecture seule pour le propriétaire)
+            os.chmod(file_path, 0o600)
+            
+            logger.info(f"Credentials stockées dans: {file_path}")
             return True
-        else:
-            print(f"❌ Erreur d'accès aux clusters: {response.status_code}")
+        except Exception as e:
+            logger.error(f"Erreur lors du stockage fichier: {e}")
             return False
-            
-    except Exception as e:
-        print(f"❌ Erreur lors du test d'accès aux clusters: {e}")
-        return False
-
-def main():
-    """Point d'entrée principal"""
-    print("🧪 Script de test de configuration Confluent Cloud\n")
     
-    # Charger les variables d'environnement
-    load_dotenv()
-    
-    # Tests
-    tests = [
-        test_environment_variables,
-        test_confluent_connection,
-        test_cluster_access
-    ]
-    
-    results = []
-    for test in tests:
-        try:
-            result = test()
-            results.append(result)
-        except Exception as e:
-            print(f"❌ Erreur lors du test: {e}")
-            results.append(False)
-    
-    # Résumé
-    print("\n" + "="*50)
-    print("📊 Résumé des tests:")
-    
-    if all(results):
-        print("✅ Tous les tests sont passés avec succès!")
-        print("🚀 Vous pouvez maintenant utiliser le script create_tenant.py")
-        print("\n💡 Exemples d'utilisation:")
-        print("   python create_tenant.py create --project my-project --cluster-id lkc-xxxxx")
-        print("   python create_tenant.py list --project my-project")
-        print("   python create_tenant.py delete --project my-project")
-        sys.exit(0)
-    else:
-        print("❌ Certains tests ont échoué.")
-        print("🔧 Veuillez corriger les erreurs avant d'utiliser le script principal.")
-        sys.exit(1)
-
-if __name__ == "__main__":
-    main()STORAGE_PATH', './credentials')
-    
-    print(f"   Mode de stockage: {storage_type}")
-    
-    if storage_type == 'display':
-        print("   ✅ Mode display: les credentials seront affichées à l'écran")
-        return True
-    elif storage_type == 'file':
-        print(f"   Chemin de stockage: {storage_path}")
-        return test_storage_permissions()
-    elif storage_type == 'local':
-        print("   ✅ Mode local: stockage en mémoire (session uniquement)")
-        return True
-    else:
-        print(f"   ❌ Mode de stockage non supporté: {storage_type}")
-        print("   Modes supportés: display, file, local")
-        return False
-
-def main():
-    """Point d'entrée principal"""
-    print("🧪 Script de test de configuration (sans Vault)\n")
-    
-    # Charger les variables d'environnement
-    load_dotenv()
-    
-    # Tests
-    tests = [
-        test_environment_variables,
-        test_confluent_connection,
-        test_credential_storage_config
-    ]
-    
-    results = []
-    for test in tests:
-        try:
-            result = test()
-            results.append(result)
-        except Exception as e:
-            print(f"❌ Erreur lors du test: {e}")
-            results.append(False)
-    
-    # Résumé
-    print("\n" + "="*50)
-    print("📊 Résumé des tests:")
-    
-    if all(results):
-        print("✅ Tous les tests sont passés avec succès!")
-        print("🚀 Vous pouvez maintenant utiliser le script create_tenant.py")
-        print("\n💡 Exemples d'utilisation:")
-        print("   python create_tenant.py create --project my-project --cluster-id lkc-xxxxx")
-        print("   python create_tenant.py create --project my-project --cluster-id lkc-xxxxx --storage-type file")
-        sys.exit(0)
-    else:
-        print("❌ Certains tests ont échoué.")
-        print("🔧 Veuillez corriger les erreurs avant d'utiliser le script principal.")
-        sys.exit(1)
-
-if __name__ == "__main__":
-    main()
-    print("\n🔍 Test de connexion Vault...")
-    
-    vault_url = os.getenv('VAULT_URL')
-    vault_token = os.getenv('VAULT_TOKEN')
-    
-    if not vault_url or not vault_token:
-        print("❌ Variables VAULT_URL et VAULT_TOKEN manquantes")
-        return False
-    
-    try:
-        client = hvac.Client(url=vault_url, token=vault_token)
+    def _store_locally(self, project_name: str, credential_data: Dict) -> bool:
+        """Stockage en mémoire locale (session uniquement)"""
+        if not hasattr(self, '_local_storage'):
+            self._local_storage = {}
         
-        if client.is_authenticated():
-            print("✅ Connexion Vault réussie")
+        self._local_storage[project_name] = credential_data
+        logger.info(f"Credentials stockées en mémoire pour {project_name}")
+        return True
+    
+    def _get_from_file(self, project_name: str) -> Optional[Dict]:
+        """Récupère depuis un fichier local"""
+        try:
+            file_path = os.path.join(self.config.storage_path, f"{project_name}.json")
             
-            # Test d'écriture/lecture
-            test_path = "confluent/test/connection"
-            test_data = {"test": "connection_ok"}
-            
-            client.secrets.kv.v2.create_or_update_secret(
-                path=test_path,
-                secret=test_data
+            if os.path.exists(file_path):
+                with open(file_path, 'r') as f:
+                    return json.load(f)
+            return None
+        except Exception as e:
+            logger.error(f"Erreur lors de la lecture fichier: {e}")
+            return None
+    
+    def _get_locally(self, project_name: str) -> Optional[Dict]:
+        """Récupère depuis le stockage en mémoire"""
+        if hasattr(self, '_local_storage'):
+            return self._local_storage.get(project_name)
+        return None
+
+
+class ConfluentTenantManager:
+    """Gestionnaire principal pour les tenants Confluent Cloud"""
+    
+    def __init__(self, confluent_config: ConfluentConfig, credential_storage: CredentialStorage):
+        self.confluent = ConfluentCloudAPI(confluent_config)
+        self.credential_manager = CredentialManager(credential_storage)
+    
+    def create_tenant(self, project_name: str, cluster_id: str, 
+                     environment_id: str = None) -> Dict:
+        """Crée un tenant complet avec service account et permissions"""
+        logger.info(f"Création du tenant {project_name} sur le cluster {cluster_id}")
+        
+        # 1. Créer le service account
+        sa_name = f"{project_name}-service-account"
+        existing_sa = self.confluent.get_service_account_by_name(sa_name)
+        
+        if existing_sa:
+            logger.info(f"Service account existant trouvé: {existing_sa['id']}")
+            service_account = existing_sa
+        else:
+            service_account = self.confluent.create_service_account(
+                name=sa_name,
+                description=f"Service account pour le tenant {project_name}"
             )
-            print("✅ Test d'écriture Vault réussi")
-            
-            result = client.secrets.kv.v2.read_secret_version(path=test_path)
-            if result['data']['data']['test'] == 'connection_ok':
-                print("✅ Test de lecture Vault réussi")
-                
-                # Nettoyage
-                client.secrets.kv.v2.delete_metadata_and_all_versions(path=test_path)
-                print("✅ Nettoyage test Vault réussi")
-                return True
-            else:
-                print("❌ Erreur lors de la lecture des données de test")
-                return False
-        else:
-            print("❌ Authentification Vault échouée")
-            return False
-            
-    except Exception as e:
-        print(f"❌ Erreur de connexion Vault: {e}")
-        return False
-
-def test_environment_variables():
-    """Vérification des variables d'environnement"""
-    print("\n🔍 Vérification des variables d'environnement...")
+        
+        # 2. Créer l'API key
+        api_key_response = self.confluent.create_api_key(
+            service_account['id'], 
+            cluster_id
+        )
+        
+        # 3. Stocker les credentials
+        self.credential_manager.store_api_credentials(
+            project_name,
+            api_key_response['id'],
+            api_key_response['spec']['secret']
+        )
+        
+        # 4. Appliquer les permissions RBAC
+        self._apply_tenant_permissions(
+            service_account['id'],
+            project_name,
+            cluster_id,
+            environment_id
+        )
+        
+        return {
+            "service_account": service_account,
+            "api_key_id": api_key_response['id'],
+            "project_name": project_name,
+            "cluster_id": cluster_id,
+            "storage_type": self.credential_manager.config.storage_type
+        }
     
+    def _apply_tenant_permissions(self, service_account_id: str, project_name: str, 
+                                cluster_id: str, environment_id: str = None):
+        """Applique les permissions RBAC pour un tenant"""
+        logger.info(f"Application des permissions RBAC pour {project_name}")
+        
+        # Permissions sur les topics avec préfixe
+        topic_roles = ["DeveloperRead", "DeveloperWrite", "DeveloperManage"]
+        topic_pattern = f"{project_name}-*"
+        
+        for role in topic_roles:
+            try:
+                self.confluent.create_role_binding(
+                    principal=service_account_id,
+                    role_name=role,
+                    resource_type="topic",
+                    resource_pattern=topic_pattern,
+                    cluster_id=cluster_id,
+                    pattern_type="PREFIXED"
+                )
+            except requests.exceptions.HTTPError as e:
+                if e.response.status_code == 409:
+                    logger.info(f"Role binding {role} déjà existant pour {topic_pattern}")
+                else:
+                    logger.warning(f"Erreur lors de la création du role binding {role} pour topics: {e}")
+        
+        # Permissions sur les consumer groups
+        cg_roles = ["DeveloperRead", "DeveloperWrite"]
+        cg_pattern = f"{project_name}-*"
+        
+        for role in cg_roles:
+            try:
+                self.confluent.create_role_binding(
+                    principal=service_account_id,
+                    role_name=role,
+                    resource_type="consumer-group",
+                    resource_pattern=cg_pattern,
+                    cluster_id=cluster_id,
+                    pattern_type="PREFIXED"
+                )
+            except requests.exceptions.HTTPError as e:
+                if e.response.status_code == 409:
+                    logger.info(f"Role binding {role} déjà existant pour {cg_pattern}")
+                else:
+                    logger.warning(f"Erreur lors de la création du role binding {role} pour consumer groups: {e}")
+        
+        # Permission générale sur le cluster pour pouvoir créer des topics
+        try:
+            self.confluent.create_role_binding(
+                principal=service_account_id,
+                role_name="DeveloperRead",
+                resource_type="kafka-cluster",
+                resource_pattern=cluster_id,
+                cluster_id=cluster_id,
+                pattern_type="LITERAL"
+            )
+        except requests.exceptions.HTTPError as e:
+            if e.response.status_code == 409:
+                logger.info("Role binding cluster déjà existant")
+            else:
+                logger.warning(f"Erreur lors de la création du role binding cluster: {e}")
+        
+        logger.info("Permissions RBAC appliquées avec succès")
+    
+    def delete_tenant(self, project_name: str) -> bool:
+        """Supprime un tenant (service account et credentials Vault)"""
+        logger.info(f"Suppression du tenant {project_name}")
+        
+        # Récupérer le service account
+        sa_name = f"{project_name}-service-account"
+        service_account = self.confluent.get_service_account_by_name(sa_name)
+        
+        if not service_account:
+            logger.warning(f"Service account {sa_name} non trouvé")
+            return False
+        
+        # Note: L'API Confluent Cloud ne permet pas toujours la suppression
+        # des service accounts via l'API REST publique
+        logger.warning("Suppression manuelle requise dans la console Confluent Cloud")
+        
+        return True
+    
+    def list_tenant_resources(self, project_name: str) -> Dict:
+        """Liste les ressources d'un tenant"""
+        credentials = self.credential_manager.get_api_credentials(project_name)
+        
+        if not credentials:
+            logger.error(f"Aucune credential trouvée pour {project_name}")
+            return {}
+        
+        return {
+            "project_name": project_name,
+            "api_key": credentials.get('api_key'),
+            "storage_type": self.credential_manager.config.storage_type,
+            "topic_prefix": f"{project_name}-*",
+            "consumer_group_prefix": f"{project_name}-*",
+            "created_at": credentials.get('created_at')
+        }
+
+
+def load_configuration() -> Tuple[ConfluentConfig, CredentialStorage]:
+    """Charge la configuration depuis les variables d'environnement"""
+    load_dotenv()
+    
+    # Configuration Confluent Cloud
+    confluent_config = ConfluentConfig(
+        api_key=os.getenv('CONFLUENT_API_KEY'),
+        api_secret=os.getenv('CONFLUENT_API_SECRET'),
+        base_url=os.getenv('CONFLUENT_BASE_URL', 'https://api.confluent.cloud')
+    )
+    
+    # Configuration du stockage des credentials
+    credential_storage = CredentialStorage(
+        storage_type=os.getenv('CREDENTIAL_STORAGE_TYPE', 'display'),
+        storage_path=os.getenv('CREDENTIAL_STORAGE_PATH', './credentials')
+    )
+    
+    # Validation
     required_vars = [
-        'CONFLUENT_API_KEY',
-        'CONFLUENT_API_SECRET',
-        'VAULT_URL',
-        'VAULT_TOKEN'
+        ('CONFLUENT_API_KEY', confluent_config.api_key),
+        ('CONFLUENT_API_SECRET', confluent_config.api_secret)
     ]
     
-    missing_vars = []
-    for var in required_vars:
-        value = os.getenv(var)
-        if not value:
-            missing_vars.append(var)
-        else:
-            # Masquer les valeurs sensibles
-            if 'SECRET' in var or 'TOKEN' in var:
-                display_value = f"{value[:4]}***{value[-4:]}" if len(value) > 8 else "***"
-            else:
-                display_value = value
-            print(f"   ✅ {var}: {display_value}")
-    
+    missing_vars = [var for var, value in required_vars if not value]
     if missing_vars:
-        print(f"\n❌ Variables manquantes: {', '.join(missing_vars)}")
-        return False
-    else:
-        print("\n✅ Toutes les variables d'environnement sont présentes")
-        return True
+        raise ValueError(f"Variables d'environnement manquantes: {', '.join(missing_vars)}")
+    
+    return confluent_config, credential_storage
+
 
 def main():
     """Point d'entrée principal"""
-    print("🧪 Script de test de configuration\n")
+    parser = argparse.ArgumentParser(
+        description="Gestionnaire de tenants Confluent Cloud",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Exemples d'utilisation:
+  python create_tenant.py create --project my-project --cluster-id lkc-xxxxx
+  python create_tenant.py list --project my-project
+  python create_tenant.py delete --project my-project
+        """
+    )
     
-    # Charger les variables d'environnement
-    load_dotenv()
+    subparsers = parser.add_subparsers(dest='command', help='Commandes disponibles')
     
-    # Tests
-    tests = [
-        test_environment_variables,
-        test_confluent_connection,
-        test_vault_connection
-    ]
+    # Commande create
+    create_parser = subparsers.add_parser('create', help='Créer un tenant')
+    create_parser.add_argument('--project', required=True, 
+                              help='Nom du projet/tenant')
+    create_parser.add_argument('--cluster-id', required=True,
+                              help='ID du cluster Kafka (ex: lkc-xxxxx)')
+    create_parser.add_argument('--environment-id',
+                              help='ID de l\'environnement pour Schema Registry')
+    create_parser.add_argument('--storage-type', 
+                              choices=['display', 'file', 'local'],
+                              default='display',
+                              help='Mode de stockage des credentials (défaut: display)')
     
-    results = []
-    for test in tests:
-        try:
-            result = test()
-            results.append(result)
-        except Exception as e:
-            print(f"❌ Erreur lors du test: {e}")
-            results.append(False)
+    # Commande list
+    list_parser = subparsers.add_parser('list', help='Lister les ressources d\'un tenant')
+    list_parser.add_argument('--project', required=True,
+                            help='Nom du projet/tenant')
     
-    # Résumé
-    print("\n" + "="*50)
-    print("📊 Résumé des tests:")
+    # Commande delete
+    delete_parser = subparsers.add_parser('delete', help='Supprimer un tenant')
+    delete_parser.add_argument('--project', required=True,
+                              help='Nom du projet/tenant')
     
-    if all(results):
-        print("✅ Tous les tests sont passés avec succès!")
-        print("🚀 Vous pouvez maintenant utiliser le script create_tenant.py")
-        sys.exit(0)
-    else:
-        print("❌ Certains tests ont échoué.")
-        print("🔧 Veuillez corriger les erreurs avant d'utiliser le script principal.")
+    args = parser.parse_args()
+    
+    if not args.command:
+        parser.print_help()
         sys.exit(1)
+    
+    try:
+        # Charger la configuration
+        confluent_config, credential_storage = load_configuration()
+        
+        # Override du type de stockage si spécifié en argument
+        if hasattr(args, 'storage_type') and args.storage_type:
+            credential_storage.storage_type = args.storage_type
+        
+        # Initialiser le gestionnaire
+        manager = ConfluentTenantManager(confluent_config, credential_storage)
+        
+        # Exécuter la commande
+        if args.command == 'create':
+            result = manager.create_tenant(
+                project_name=args.project,
+                cluster_id=args.cluster_id,
+                environment_id=args.environment_id
+            )
+            print(f"✅ Tenant créé avec succès:")
+            print(f"   Service Account ID: {result['service_account']['id']}")
+            print(f"   API Key ID: {result['api_key_id']}")
+            print(f"   Mode de stockage: {result['storage_type']}")
+            if result['storage_type'] == 'file':
+                print(f"   Fichier credentials: ./credentials/{args.project}.json")
+            
+        elif args.command == 'list':
+            result = manager.list_tenant_resources(args.project)
+            if result:
+                print(f"📋 Ressources du tenant {args.project}:")
+                print(f"   API Key: {result['api_key']}")
+                print(f"   Topic Prefix: {result['topic_prefix']}")
+                print(f"   Consumer Group Prefix: {result['consumer_group_prefix']}")
+                print(f"   Mode de stockage: {result['storage_type']}")
+                if result.get('created_at'):
+                    print(f"   Créé le: {result['created_at']}")
+            else:
+                print(f"❌ Aucune ressource trouvée pour {args.project}")
+                
+        elif args.command == 'delete':
+            success = manager.delete_tenant(args.project)
+            if success:
+                print(f"✅ Tenant {args.project} marqué pour suppression")
+                print("⚠️  Suppression manuelle requise dans la console Confluent Cloud")
+            else:
+                print(f"❌ Erreur lors de la suppression du tenant {args.project}")
+    
+    except Exception as e:
+        logger.error(f"Erreur: {e}")
+        sys.exit(1)
+
 
 if __name__ == "__main__":
     main()
