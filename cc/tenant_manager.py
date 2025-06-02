@@ -7,6 +7,7 @@ Implémente une stratégie de multitenancy basée sur les préfixes et l'isolati
 
 import os
 import logging
+import re
 from typing import Dict, List, Optional
 from dataclasses import dataclass
 from create_tenant import ConfluentConfig, ConfluentCloudAPI, ConfluentTenantManager
@@ -37,6 +38,24 @@ class UnifiedTenantManager:
         self.resource_helper = ConfluentResourceHelper()
         self.api = ConfluentCloudAPI(self.config)
 
+    def _format_service_account_name(self, project_name: str) -> str:
+        """
+        Formate le nom du service account selon les conventions Confluent
+        
+        Args:
+            project_name: Nom du projet
+            
+        Returns:
+            Nom formaté pour le service account
+        """
+        # Remplacer les caractères non autorisés par des tirets
+        name = re.sub(r'[^a-zA-Z0-9-]', '-', project_name)
+        # S'assurer que le nom commence par une lettre
+        if not name[0].isalpha():
+            name = 'sa-' + name
+        # Limiter la longueur à 64 caractères
+        return name[:64]
+
     def _get_or_create_service_account(self, project_name: str) -> Dict:
         """
         Récupère un service account existant ou en crée un nouveau
@@ -47,16 +66,20 @@ class UnifiedTenantManager:
         Returns:
             Dict contenant les informations du service account
         """
+        # Formater le nom du service account
+        sa_name = self._format_service_account_name(project_name)
+        logger.info(f"Recherche du service account avec le nom formaté: {sa_name}")
+
         # Essayer de trouver un service account existant
-        existing_sa = self.api.get_service_account_by_name(project_name)
+        existing_sa = self.api.get_service_account_by_name(sa_name)
         if existing_sa:
-            logger.info(f"Service account existant trouvé pour {project_name}")
+            logger.info(f"Service account existant trouvé pour {sa_name}")
             return existing_sa
 
         # Si aucun service account n'existe, en créer un nouveau
-        logger.info(f"Création d'un nouveau service account pour {project_name}")
+        logger.info(f"Création d'un nouveau service account pour {sa_name}")
         return self.api.create_service_account(
-            name=project_name,
+            name=sa_name,
             description=f"Service account pour le tenant {project_name}"
         )
 
