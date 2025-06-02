@@ -1,0 +1,26 @@
+import http.client
+import base64
+
+# Remplacez par vos vraies clés API
+api_key = "VOTRE_API_KEY"
+api_secret = "VOTRE_API_SECRET"
+
+# Création de l'en-tête d'authentification Basic Auth
+# Format: base64(api_key:api_secret)
+credentials = f"{api_key}:{api_secret}"
+encoded_credentials = base64.b64encode(credentials.encode()).decode()
+
+conn = http.client.HTTPSConnection("api.confluent.cloud")
+headers = { 
+    'Authorization': f"Basic {encoded_credentials}",
+    'Content-Type': 'application/json'
+}
+
+conn.request("GET", "/iam/v2/role-bindings?principal=User:u-111aaa&role_name=CloudClusterAdmin&crn_pattern=crn://confluent.cloud/organization=1111aaaa-11aa-11aa-11aa-111111aaaaaa/environment=env-aaa1111/cloud-cluster=lkc-1111aaa", headers=headers)
+
+res = conn.getresponse()
+data = res.read()
+print(f"Status: {res.status}")
+print(f"Response: {data.decode('utf-8')}")
+
+conn.close()
