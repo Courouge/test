@@ -33,28 +33,39 @@ def find_real_ids():
             env_name = env.get('display_name')
             print(f"  - ID: {env_id}, Nom: {env_name}")
             
-            # 3. Lister les clusters dans cet environnement
-            print(f"    Clusters dans {env_name}:")
+            # 3. Lister les clusters dans cet environnement (optionnel)
+            print(f"    Recherche des clusters dans {env_name}:")
             cluster_response = requests.get(
                 f"{base_url}/cmk/v2/clusters?environment={env_id}",
                 auth=auth, headers=headers
             )
+            
             if cluster_response.status_code == 200:
                 try:
                     cluster_data = cluster_response.json()
                     if cluster_data and isinstance(cluster_data, dict):
                         clusters = cluster_data.get('data', [])
                         if clusters:
+                            print(f"      {len(clusters)} cluster(s) trouvé(s):")
                             for cluster in clusters:
-                                print(f"      - ID: {cluster.get('id')}, Nom: {cluster.get('display_name')}")
+                                cluster_id = cluster.get('id', 'N/A')
+                                cluster_name = cluster.get('display_name', 'Sans nom')
+                                cluster_type = cluster.get('type', 'N/A')
+                                print(f"        - ID: {cluster_id}, Nom: {cluster_name}, Type: {cluster_type}")
                         else:
-                            print("      Aucun cluster trouvé dans cet environnement")
+                            print("      Aucun cluster dans cet environnement")
                     else:
-                        print(f"      Réponse inattendue: {cluster_response.text}")
-                except json.JSONDecodeError:
-                    print(f"      Erreur JSON: {cluster_response.text}")
+                        print(f"      Réponse API clusters vide ou invalide")
+                except json.JSONDecodeError as e:
+                    print(f"      Erreur de parsing JSON: {e}")
+                    print(f"      Contenu reçu: {cluster_response.text[:200]}...")
+            elif cluster_response.status_code == 403:
+                print("      Accès refusé pour lister les clusters (permissions insuffisantes)")
+            elif cluster_response.status_code == 404:
+                print("      Endpoint clusters non trouvé ou environnement invalide")
             else:
-                print(f"      Erreur API clusters (Status {cluster_response.status_code}): {cluster_response.text}")
+                print(f"      Erreur API clusters (Status {cluster_response.status_code})")
+                print(f"      Message: {cluster_response.text[:200]}...")
     
     print("\n" + "-"*50 + "\n")
     
