@@ -5,209 +5,183 @@ import json
 api_key = "VOTRE_API_KEY"
 api_secret = "VOTRE_API_SECRET"
 
-def explore_all_resources():
+def list_everything():
     base_url = "https://api.confluent.cloud"
     auth = HTTPBasicAuth(api_key, api_secret)
-    headers = {'Accept': 'application/json'}
+    headers = {'Content-Type': 'application/json'}
     
-    # Liste exhaustive des endpoints à tester
-    endpoints = [
-        # IAM v2
-        ("/iam/v2/users", "Users"),
-        ("/iam/v2/service-accounts", "Service Accounts"),
-        ("/iam/v2/api-keys", "API Keys"),
-        ("/iam/v2/role-bindings", "Role Bindings v2"),
-        ("/iam/v2/roles", "Roles v2"),
-        ("/iam/v2/identity-pools", "Identity Pools"),
-        ("/iam/v2/identity-providers", "Identity Providers"),
-        ("/iam/v2/invitations", "Invitations"),
-        
-        # IAM v1 (fallback)
-        ("/iam/v1/role-bindings", "Role Bindings v1"),
-        ("/iam/v1/roles", "Roles v1"),
-        
-        # RBAC (alternative)
-        ("/rbac/v1/role-bindings", "RBAC Role Bindings"),
-        ("/rbac/v1/principals", "RBAC Principals"),
-        
-        # Organisation
-        ("/org/v2/organizations", "Organizations"),
-        ("/org/v2/environments", "Environments"),
-        
-        # Clusters & Resources
-        ("/cmk/v2/clusters", "Kafka Clusters"),
-        ("/srcm/v2/clusters", "Schema Registry Clusters"),
-        ("/connect/v1/environments", "Connect Environments"),
-        ("/ksqldb/v2/clusters", "ksqlDB Clusters"),
-        
-        # Kafka Resources
-        ("/kafka/v3/clusters", "Kafka v3 Clusters"),
-        ("/kafka/v3/topics", "Kafka Topics"),
-        ("/kafka/v3/consumer-groups", "Consumer Groups"),
-        ("/kafka/v3/acls", "Kafka ACLs"),
-        
-        # Metrics & Monitoring
-        ("/metrics/v2/export", "Metrics Export"),
-        ("/metrics/v2/descriptors", "Metrics Descriptors"),
-        
-        # Billing & Usage
-        ("/billing/v1/costs", "Billing Costs"),
-        ("/billing/v1/payment-methods", "Payment Methods"),
-        
-        # Networking
-        ("/networking/v1/networks", "Networks"),
-        ("/networking/v1/peerings", "Peerings"),
-        ("/networking/v1/private-link-accesses", "Private Link"),
-        
-        # Connectors
-        ("/connect/v1/connectors", "Connectors"),
-        ("/connect/v1/connector-plugins", "Connector Plugins"),
-        
-        # Schema Registry
-        ("/subject-config", "SR Subject Config"),
-        ("/subjects", "SR Subjects"),
-        ("/schemas", "SR Schemas"),
-        
-        # Data Catalog
-        ("/catalog/v1/entity", "Data Catalog Entities"),
-        ("/catalog/v1/search", "Data Catalog Search"),
-        
-        # Stream Governance
-        ("/sg/v1/clusters", "Stream Governance"),
-        
-        # Pipelines
-        ("/sd/v1/pipelines", "Stream Designer Pipelines"),
-        
-        # Audit Logs
-        ("/service/audit/v1/audit-logs", "Audit Logs"),
-    ]
+    print("=== INVENTAIRE COMPLET CONFLUENT CLOUD ===\n")
     
-    print("=== EXPLORATION COMPLÈTE CONFLUENT CLOUD ===")
-    print(f"Total endpoints à tester: {len(endpoints)}\n")
+    # 1. Service Accounts
+    print("1. 🤖 SERVICE ACCOUNTS")
+    print("-" * 50)
     
-    results = {
-        'success': [],
-        'forbidden': [],
-        'not_found': [],
-        'error': []
-    }
+    response = requests.get(f"{base_url}/iam/v2/service-accounts", auth=auth, headers=headers)
     
-    for endpoint, name in endpoints:
+    print(f"Status: {response.status_code}")
+    if response.status_code == 200:
         try:
-            response = requests.get(f"{base_url}{endpoint}", auth=auth, headers=headers, timeout=10)
+            data = response.json()
+            service_accounts = data.get('data', [])
+            print(f"Nombre de Service Accounts: {len(service_accounts)}\n")
             
-            status = response.status_code
-            
-            if status == 200:
-                try:
-                    data = response.json()
-                    if isinstance(data, dict) and 'data' in data:
-                        count = len(data['data'])
-                        results['success'].append(f"✅ {name:<25} → {count:>3} items")
-                    elif isinstance(data, list):
-                        count = len(data)
-                        results['success'].append(f"✅ {name:<25} → {count:>3} items")
-                    else:
-                        results['success'].append(f"✅ {name:<25} → OK (non-standard)")
-                except:
-                    results['success'].append(f"✅ {name:<25} → OK (non-JSON)")
-                    
-            elif status == 403:
-                results['forbidden'].append(f"🔒 {name:<25} → Forbidden")
-            elif status == 404:
-                results['not_found'].append(f"❌ {name:<25} → Not Found")
-            elif status == 400:
-                results['error'].append(f"⚠️  {name:<25} → Bad Request")
-            elif status == 401:
-                results['error'].append(f"🔑 {name:<25} → Unauthorized")
+            if service_accounts:
+                for sa in service_accounts:
+                    sa_id = sa.get('id', 'N/A')
+                    sa_name = sa.get('display_name', 'Sans nom')
+                    sa_desc = sa.get('description', 'Pas de description')
+                    print(f"📋 {sa_name}")
+                    print(f"   ID: {sa_id}")
+                    print(f"   Description: {sa_desc}")
+                    print()
             else:
-                results['error'].append(f"❓ {name:<25} → HTTP {status}")
+                print("Aucun Service Account trouvé")
                 
-        except requests.exceptions.Timeout:
-            results['error'].append(f"⏱️  {name:<25} → Timeout")
         except Exception as e:
-            results['error'].append(f"💥 {name:<25} → {str(e)[:20]}...")
-    
-    # Affichage compact des résultats
-    print("🟢 ENDPOINTS FONCTIONNELS:")
-    print("-" * 45)
-    for result in results['success']:
-        print(result)
-    
-    if results['forbidden']:
-        print(f"\n🔒 ACCÈS REFUSÉ ({len(results['forbidden'])}):")
-        print("-" * 30)
-        for result in results['forbidden']:
-            print(result)
-    
-    if results['not_found']:
-        print(f"\n❌ NON TROUVÉS ({len(results['not_found'])}):")
-        print("-" * 25)
-        for result in results['not_found']:
-            print(result)
-    
-    if results['error']:
-        print(f"\n⚠️  ERREURS ({len(results['error'])}):")
-        print("-" * 20)
-        for result in results['error']:
-            print(result)
-    
-    # Statistiques
-    total_success = len(results['success'])
-    total_accessible = total_success + len(results['forbidden'])
-    total_endpoints = len(endpoints)
-    
-    print(f"\n📊 RÉSUMÉ:")
-    print(f"   Fonctionnels: {total_success}/{total_endpoints}")
-    print(f"   Accessibles: {total_accessible}/{total_endpoints}")
-    print(f"   Taux succès: {(total_success/total_endpoints)*100:.1f}%")
-    
-    # Si on a trouvé des ressources avec role bindings ou permissions
-    print(f"\n🔍 ENDPOINTS LIÉS AUX PERMISSIONS:")
-    permission_endpoints = [r for r in results['success'] if any(word in r.lower() for word in ['role', 'rbac', 'acl', 'permission', 'auth'])]
-    if permission_endpoints:
-        for endpoint in permission_endpoints:
-            print(f"   {endpoint}")
+            print(f"Erreur parsing: {e}")
+            print(f"Réponse brute: {response.text[:500]}...")
     else:
-        print("   Aucun endpoint de permissions trouvé")
-
-def quick_test_working_endpoints():
-    """Test rapide des endpoints qui fonctionnent"""
-    base_url = "https://api.confluent.cloud"
-    auth = HTTPBasicAuth(api_key, api_secret)
-    headers = {'Accept': 'application/json'}
+        print(f"Erreur: {response.text[:300]}...")
     
-    # Endpoints les plus susceptibles de contenir des infos sur les permissions
-    quick_endpoints = [
-        "/iam/v2/users",
-        "/iam/v2/service-accounts", 
-        "/org/v2/environments",
-        "/cmk/v2/clusters",
-        "/kafka/v3/acls",
-    ]
+    print("\n" + "="*60 + "\n")
     
-    print(f"\n{'='*60}")
-    print("🚀 TEST RAPIDE DES RESSOURCES PRINCIPALES")
-    print(f"{'='*60}")
+    # 2. API Keys
+    print("2. 🔑 API KEYS")
+    print("-" * 50)
     
-    for endpoint in quick_endpoints:
+    response = requests.get(f"{base_url}/iam/v2/api-keys", auth=auth, headers=headers)
+    
+    print(f"Status: {response.status_code}")
+    if response.status_code == 200:
         try:
-            response = requests.get(f"{base_url}{endpoint}", auth=auth, headers=headers, timeout=5)
-            if response.status_code == 200:
-                data = response.json()
-                items = data.get('data', data if isinstance(data, list) else [])
-                print(f"\n📋 {endpoint.split('/')[-1].upper()}:")
+            data = response.json()
+            api_keys = data.get('data', [])
+            print(f"Nombre d'API Keys: {len(api_keys)}\n")
+            
+            if api_keys:
+                for key in api_keys:
+                    key_id = key.get('id', 'N/A')
+                    key_desc = key.get('description', 'Pas de description')
+                    owner = key.get('owner', {})
+                    owner_id = owner.get('id', 'N/A') if owner else 'N/A'
+                    spec = key.get('spec', {})
+                    resource = spec.get('resource', {}) if spec else {}
+                    resource_id = resource.get('id', 'N/A') if resource else 'N/A'
+                    
+                    print(f"🔐 API Key: {key_id}")
+                    print(f"   Description: {key_desc}")
+                    print(f"   Owner: {owner_id}")
+                    print(f"   Resource: {resource_id}")
+                    print()
+            else:
+                print("Aucune API Key trouvée")
                 
-                if items and len(items) <= 5:  # Afficher le détail si peu d'items
-                    for i, item in enumerate(items[:3], 1):
-                        item_id = item.get('id', 'N/A')
-                        item_name = item.get('display_name') or item.get('name') or item.get('email', 'Sans nom')
-                        print(f"   {i}. {item_name} (ID: {item_id})")
+        except Exception as e:
+            print(f"Erreur parsing: {e}")
+            print(f"Réponse brute: {response.text[:500]}...")
+    else:
+        print(f"Erreur: {response.text[:300]}...")
+    
+    print("\n" + "="*60 + "\n")
+    
+    # 3. Utilisateurs
+    print("3. 👥 UTILISATEURS")
+    print("-" * 50)
+    
+    response = requests.get(f"{base_url}/iam/v2/users", auth=auth, headers=headers)
+    
+    print(f"Status: {response.status_code}")
+    if response.status_code == 200:
+        try:
+            data = response.json()
+            users = data.get('data', [])
+            print(f"Nombre d'utilisateurs: {len(users)}\n")
+            
+            if users:
+                for user in users:
+                    user_id = user.get('id', 'N/A')
+                    user_email = user.get('email', 'Pas d\'email')
+                    user_name = user.get('full_name', 'Pas de nom')
+                    
+                    print(f"👤 {user_name}")
+                    print(f"   ID: {user_id}")
+                    print(f"   Email: {user_email}")
+                    print()
+            else:
+                print("Aucun utilisateur trouvé")
+                
+        except Exception as e:
+            print(f"Erreur parsing: {e}")
+            print(f"Réponse brute: {response.text[:500]}...")
+    else:
+        print(f"Erreur: {response.text[:300]}...")
+    
+    print("\n" + "="*60 + "\n")
+    
+    # 4. Test simple des role bindings
+    print("4. 🔒 TEST SIMPLE DES ROLE BINDINGS")
+    print("-" * 50)
+    
+    response = requests.get(f"{base_url}/iam/v2/role-bindings", auth=auth, headers=headers)
+    
+    print(f"Status: {response.status_code}")
+    if response.status_code == 200:
+        try:
+            data = response.json()
+            print(f"Structure de la réponse: {list(data.keys()) if data else 'Vide'}")
+            
+            if 'data' in data:
+                bindings = data['data']
+                print(f"Nombre de role bindings: {len(bindings)}")
+                
+                if bindings:
+                    print("\nPremiers role bindings:")
+                    for i, binding in enumerate(bindings[:3]):  # Afficher seulement les 3 premiers
+                        print(f"\n🔗 Binding #{i+1}:")
+                        print(f"   Principal: {binding.get('principal', 'N/A')}")
+                        print(f"   Role: {binding.get('role_name', 'N/A')}")
+                        print(f"   CRN: {binding.get('crn_pattern', 'N/A')}")
+                    
+                    if len(bindings) > 3:
+                        print(f"\n... et {len(bindings) - 3} autres")
                 else:
-                    print(f"   {len(items)} élément(s) trouvé(s)")
-        except:
-            pass
+                    print("Liste de role bindings vide")
+            else:
+                print("Pas de clé 'data' dans la réponse")
+                print(f"Contenu: {json.dumps(data, indent=2)[:500]}...")
+                
+        except Exception as e:
+            print(f"Erreur parsing: {e}")
+            print(f"Réponse brute: {response.text[:500]}...")
+    else:
+        print(f"Erreur: {response.text[:300]}...")
+    
+    print("\n" + "="*60 + "\n")
+    
+    # 5. Informations sur l'organisation
+    print("5. 🏢 ORGANISATION")
+    print("-" * 50)
+    
+    response = requests.get(f"{base_url}/org/v2/organizations", auth=auth, headers=headers)
+    
+    print(f"Status: {response.status_code}")
+    if response.status_code == 200:
+        try:
+            data = response.json()
+            orgs = data.get('data', [])
+            print(f"Nombre d'organisations: {len(orgs)}\n")
+            
+            for org in orgs:
+                org_id = org.get('id', 'N/A')
+                org_name = org.get('display_name', 'Sans nom')
+                print(f"🏢 {org_name}")
+                print(f"   ID: {org_id}")
+                
+        except Exception as e:
+            print(f"Erreur parsing: {e}")
+            print(f"Réponse brute: {response.text[:500]}...")
+    else:
+        print(f"Erreur: {response.text[:300]}...")
 
 if __name__ == "__main__":
-    explore_all_resources()
-    quick_test_working_endpoints()
+    list_everything()
