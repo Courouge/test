@@ -1,0 +1,28 @@
+import requests
+from requests.auth import HTTPBasicAuth
+
+# Remplacez par vos vraies clés API
+api_key = "VOTRE_API_KEY"
+api_secret = "VOTRE_API_SECRET"
+
+url = "https://api.confluent.cloud/iam/v2/role-bindings"
+params = {
+    "principal": "User:u-111aaa",
+    "role_name": "CloudClusterAdmin", 
+    "crn_pattern": "crn://confluent.cloud/organization=1111aaaa-11aa-11aa-11aa-111111aaaaaa/environment=env-aaa1111/cloud-cluster=lkc-1111aaa"
+}
+
+response = requests.get(
+    url, 
+    params=params,
+    auth=HTTPBasicAuth(api_key, api_secret),
+    headers={'Content-Type': 'application/json'}
+)
+
+print(f"Status: {response.status_code}")
+print(f"Response: {response.text}")
+
+# Si vous voulez récupérer les données JSON
+if response.status_code == 200:
+    data = response.json()
+    print(f"JSON data: {data}")
