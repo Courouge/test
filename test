@@ -2,7 +2,7 @@
 """
 Confluent Cloud Tenant Manager
 Automatise la création de service accounts et la gestion des permissions RBAC
-pour des tenants applicatifs dans Confluent Cloud avec stockage sécurisé dans Vault.
+pour des tenants applicatifs dans Confluent Cloud.
 """
 
 import argparse
@@ -34,13 +34,6 @@ class ConfluentConfig:
     base_url: str = "https://api.confluent.cloud"
     
     
-@dataclass
-class CredentialStorage:
-    """Configuration pour le stockage des credentials"""
-    storage_type: str = "local"  # "local", "display", "file"
-    storage_path: str = "./credentials"
-
-
 @dataclass
 class TenantPermissions:
     """Définition des permissions pour un tenant"""
@@ -112,9 +105,15 @@ class ConfluentCloudAPI:
         
         # Construction du CRN en fonction du type de ressource
         if resource_type == "topic":
-            crn_pattern = f"crn://confluent.cloud/organization=*/environment=*/cloud-cluster=*/kafka-cluster={cluster_id}/topic={resource_pattern}"
+            if pattern_type == "PREFIXED":
+                crn_pattern = f"crn://confluent.cloud/organization=*/environment=*/cloud-cluster=*/kafka-cluster={cluster_id}/topic={resource_pattern}"
+            else:
+                crn_pattern = f"crn://confluent.cloud/organization=*/environment=*/cloud-cluster=*/kafka-cluster={cluster_id}/topic={resource_pattern}"
         elif resource_type == "consumer-group":
-            crn_pattern = f"crn://confluent.cloud/organization=*/environment=*/cloud-cluster=*/kafka-cluster={cluster_id}/group={resource_pattern}"
+            if pattern_type == "PREFIXED":
+                crn_pattern = f"crn://confluent.cloud/organization=*/environment=*/cloud-cluster=*/kafka-cluster={cluster_id}/group={resource_pattern}"
+            else:
+                crn_pattern = f"crn://confluent.cloud/organization=*/environment=*/cloud-cluster=*/kafka-cluster={cluster_id}/group={resource_pattern}"
         elif resource_type == "kafka-cluster":
             crn_pattern = f"crn://confluent.cloud/organization=*/environment=*/cloud-cluster=*/kafka-cluster={cluster_id}"
         else:
@@ -126,7 +125,16 @@ class ConfluentCloudAPI:
             "crn_pattern": crn_pattern
         }
         
+        logger.debug(f"Tentative de création role binding: {payload}")
+        
         response = self.session.post(url, json=payload)
+        
+        # Log détaillé de l'erreur pour debug
+        if response.status_code >= 400:
+            logger.debug(f"Response status: {response.status_code}")
+            logger.debug(f"Response body: {response.text}")
+            logger.debug(f"Request payload: {json.dumps(payload, indent=2)}")
+        
         response.raise_for_status()
         
         role_binding = response.json()
@@ -163,110 +171,11 @@ class ConfluentCloudAPI:
         return None
 
 
-class CredentialManager:
-    """Gestionnaire pour le stockage des credentials (sans Vault)"""
-    
-    def __init__(self, config: CredentialStorage):
-        self.config = config
-        if config.storage_type == "file" and not os.path.exists(config.storage_path):
-            os.makedirs(config.storage_path, mode=0o700)
-    
-    def store_api_credentials(self, project_name: str, api_key: str, api_secret: str) -> bool:
-        """Stocke les credentials API selon le mode configuré"""
-        credential_data = {
-            "project_name": project_name,
-            "api_key": api_key,
-            "api_secret": api_secret,
-            "created_at": datetime.now().isoformat()
-        }
-        
-        if self.config.storage_type == "display":
-            self._display_credentials(credential_data)
-            return True
-        elif self.config.storage_type == "file":
-            return self._store_to_file(project_name, credential_data)
-        elif self.config.storage_type == "local":
-            return self._store_locally(project_name, credential_data)
-        else:
-            logger.error(f"Mode de stockage non supporté: {self.config.storage_type}")
-            return False
-    
-    def get_api_credentials(self, project_name: str) -> Optional[Dict]:
-        """Récupère les credentials API"""
-        if self.config.storage_type == "file":
-            return self._get_from_file(project_name)
-        elif self.config.storage_type == "local":
-            return self._get_locally(project_name)
-        else:
-            logger.warning("Mode display ne supporte pas la récupération")
-            return None
-    
-    def _display_credentials(self, credential_data: Dict):
-        """Affiche les credentials de manière sécurisée"""
-        print("\n" + "="*60)
-        print("🔑 CREDENTIALS GÉNÉRÉES - À SAUVEGARDER IMMÉDIATEMENT")
-        print("="*60)
-        print(f"Projet: {credential_data['project_name']}")
-        print(f"API Key: {credential_data['api_key']}")
-        print(f"API Secret: {credential_data['api_secret']}")
-        print(f"Créé le: {credential_data['created_at']}")
-        print("="*60)
-        print("⚠️  IMPORTANT: Sauvegardez ces credentials dans un gestionnaire")
-        print("   de secrets sécurisé. Ils ne seront plus affichés.")
-        print("="*60)
-    
-    def _store_to_file(self, project_name: str, credential_data: Dict) -> bool:
-        """Stocke dans un fichier local chiffré/protégé"""
-        try:
-            file_path = os.path.join(self.config.storage_path, f"{project_name}.json")
-            
-            with open(file_path, 'w') as f:
-                json.dump(credential_data, f, indent=2)
-            
-            # Sécuriser le fichier (lecture seule pour le propriétaire)
-            os.chmod(file_path, 0o600)
-            
-            logger.info(f"Credentials stockées dans: {file_path}")
-            return True
-        except Exception as e:
-            logger.error(f"Erreur lors du stockage fichier: {e}")
-            return False
-    
-    def _store_locally(self, project_name: str, credential_data: Dict) -> bool:
-        """Stockage en mémoire locale (session uniquement)"""
-        if not hasattr(self, '_local_storage'):
-            self._local_storage = {}
-        
-        self._local_storage[project_name] = credential_data
-        logger.info(f"Credentials stockées en mémoire pour {project_name}")
-        return True
-    
-    def _get_from_file(self, project_name: str) -> Optional[Dict]:
-        """Récupère depuis un fichier local"""
-        try:
-            file_path = os.path.join(self.config.storage_path, f"{project_name}.json")
-            
-            if os.path.exists(file_path):
-                with open(file_path, 'r') as f:
-                    return json.load(f)
-            return None
-        except Exception as e:
-            logger.error(f"Erreur lors de la lecture fichier: {e}")
-            return None
-    
-    def _get_locally(self, project_name: str) -> Optional[Dict]:
-        """Récupère depuis le stockage en mémoire"""
-        if hasattr(self, '_local_storage'):
-            return self._local_storage.get(project_name)
-        return None
-
-
 class ConfluentTenantManager:
     """Gestionnaire principal pour les tenants Confluent Cloud"""
     
-    def __init__(self, confluent_config: ConfluentConfig, credential_storage: CredentialStorage):
+    def __init__(self, confluent_config: ConfluentConfig):
         self.confluent = ConfluentCloudAPI(confluent_config)
-        self.credential_manager = CredentialManager(credential_storage)
     
     def create_tenant(self, project_name: str, cluster_id: str, 
                      environment_id: str = None) -> Dict:
@@ -292,91 +201,135 @@ class ConfluentTenantManager:
             cluster_id
         )
         
-        # 3. Stocker les credentials
-        self.credential_manager.store_api_credentials(
+        # 3. Afficher/stocker les credentials
+        self._display_credentials(
             project_name,
             api_key_response['id'],
             api_key_response['spec']['secret']
         )
         
         # 4. Appliquer les permissions RBAC
-        self._apply_tenant_permissions(
+        rbac_success = self._apply_tenant_permissions(
             service_account['id'],
             project_name,
             cluster_id,
             environment_id
         )
         
-        return {
+        result = {
             "service_account": service_account,
             "api_key_id": api_key_response['id'],
+            "api_secret": api_key_response['spec']['secret'],
             "project_name": project_name,
             "cluster_id": cluster_id,
-            "storage_type": self.credential_manager.config.storage_type
+            "rbac_applied": rbac_success
         }
+        
+        if not rbac_success:
+            logger.warning("⚠️  Les permissions RBAC n'ont pas pu être appliquées automatiquement")
+            logger.warning("   Vous devrez les configurer manuellement dans la console Confluent Cloud")
+        
+        return result
     
     def _apply_tenant_permissions(self, service_account_id: str, project_name: str, 
                                 cluster_id: str, environment_id: str = None):
         """Applique les permissions RBAC pour un tenant"""
         logger.info(f"Application des permissions RBAC pour {project_name}")
         
-        # Permissions sur les topics avec préfixe
-        topic_roles = ["DeveloperRead", "DeveloperWrite", "DeveloperManage"]
-        topic_pattern = f"{project_name}-*"
-        
-        for role in topic_roles:
-            try:
-                self.confluent.create_role_binding(
-                    principal=service_account_id,
-                    role_name=role,
-                    resource_type="topic",
-                    resource_pattern=topic_pattern,
-                    cluster_id=cluster_id,
-                    pattern_type="PREFIXED"
-                )
-            except requests.exceptions.HTTPError as e:
-                if e.response.status_code == 409:
-                    logger.info(f"Role binding {role} déjà existant pour {topic_pattern}")
-                else:
-                    logger.warning(f"Erreur lors de la création du role binding {role} pour topics: {e}")
-        
-        # Permissions sur les consumer groups
-        cg_roles = ["DeveloperRead", "DeveloperWrite"]
-        cg_pattern = f"{project_name}-*"
-        
-        for role in cg_roles:
-            try:
-                self.confluent.create_role_binding(
-                    principal=service_account_id,
-                    role_name=role,
-                    resource_type="consumer-group",
-                    resource_pattern=cg_pattern,
-                    cluster_id=cluster_id,
-                    pattern_type="PREFIXED"
-                )
-            except requests.exceptions.HTTPError as e:
-                if e.response.status_code == 409:
-                    logger.info(f"Role binding {role} déjà existant pour {cg_pattern}")
-                else:
-                    logger.warning(f"Erreur lors de la création du role binding {role} pour consumer groups: {e}")
-        
-        # Permission générale sur le cluster pour pouvoir créer des topics
+        # Vérifier d'abord les permissions de l'API Key en cours
+        logger.info("Vérification des permissions de l'API Key...")
         try:
-            self.confluent.create_role_binding(
-                principal=service_account_id,
-                role_name="DeveloperRead",
-                resource_type="kafka-cluster",
-                resource_pattern=cluster_id,
-                cluster_id=cluster_id,
-                pattern_type="LITERAL"
-            )
-        except requests.exceptions.HTTPError as e:
-            if e.response.status_code == 409:
-                logger.info("Role binding cluster déjà existant")
-            else:
-                logger.warning(f"Erreur lors de la création du role binding cluster: {e}")
+            # Test avec une permission de base
+            response = self.confluent.session.get(f"{self.confluent.config.base_url}/iam/v2/role-bindings")
+            if response.status_code != 200:
+                logger.warning(f"API Key semble avoir des permissions limitées: {response.status_code}")
+        except Exception as e:
+            logger.warning(f"Impossible de vérifier les permissions: {e}")
         
-        logger.info("Permissions RBAC appliquées avec succès")
+        # Essayer des rôles plus simples d'abord
+        basic_roles = [
+            ("DeveloperRead", "topic", f"{project_name}-*"),
+            ("DeveloperWrite", "topic", f"{project_name}-*"),
+            ("DeveloperRead", "consumer-group", f"{project_name}-*"),
+            ("DeveloperWrite", "consumer-group", f"{project_name}-*")
+        ]
+        
+        successful_bindings = 0
+        failed_bindings = 0
+        
+        for role_name, resource_type, pattern in basic_roles:
+            try:
+                self.confluent.create_role_binding(
+                    principal=service_account_id,
+                    role_name=role_name,
+                    resource_type=resource_type,
+                    resource_pattern=pattern,
+                    cluster_id=cluster_id,
+                    pattern_type="PREFIXED"
+                )
+                successful_bindings += 1
+                logger.info(f"✅ Role binding {role_name} créé avec succès pour {resource_type}:{pattern}")
+                
+            except requests.exceptions.HTTPError as e:
+                failed_bindings += 1
+                if e.response.status_code == 403:
+                    logger.error(f"❌ Permissions insuffisantes pour créer le role binding {role_name}")
+                    logger.error(f"   Votre API Key n'a pas les permissions 'OrganizationAdmin' ou 'EnvironmentAdmin'")
+                    logger.error(f"   Ressource: {resource_type}:{pattern}")
+                elif e.response.status_code == 409:
+                    logger.info(f"ℹ️  Role binding {role_name} déjà existant pour {pattern}")
+                    successful_bindings += 1
+                elif e.response.status_code == 422:
+                    logger.warning(f"⚠️  Role ou ressource invalide: {role_name} sur {resource_type}:{pattern}")
+                    # Essayer avec un rôle alternatif
+                    if role_name == "DeveloperManage":
+                        logger.info(f"Tentative avec ResourceOwner à la place de DeveloperManage...")
+                        try:
+                            self.confluent.create_role_binding(
+                                principal=service_account_id,
+                                role_name="ResourceOwner",
+                                resource_type=resource_type,
+                                resource_pattern=pattern,
+                                cluster_id=cluster_id,
+                                pattern_type="PREFIXED"
+                            )
+                            successful_bindings += 1
+                            logger.info(f"✅ Role binding ResourceOwner créé avec succès")
+                        except Exception as e2:
+                            logger.warning(f"Échec aussi avec ResourceOwner: {e2}")
+                else:
+                    logger.warning(f"Erreur lors de la création du role binding {role_name}: {e.response.status_code} - {e.response.text}")
+            except Exception as e:
+                failed_bindings += 1
+                logger.error(f"Erreur inattendue lors de la création du role binding {role_name}: {e}")
+        
+        # Résumé
+        total_attempted = len(basic_roles)
+        if successful_bindings > 0:
+            logger.info(f"✅ {successful_bindings}/{total_attempted} permissions RBAC appliquées avec succès")
+        else:
+            logger.error(f"❌ Aucune permission RBAC n'a pu être appliquée ({failed_bindings} échecs)")
+            logger.error("🔧 ACTIONS REQUISES:")
+            logger.error("   1. Vérifiez que votre API Key a les permissions 'OrganizationAdmin'")
+            logger.error("   2. Ou appliquez les permissions manuellement dans la console Confluent Cloud")
+            logger.error(f"   3. Service Account à configurer: {service_account_id}")
+            logger.error(f"   4. Ressources: topics et consumer groups avec préfixe '{project_name}-*'")
+        
+        return successful_bindings > 0
+    
+    def _display_credentials(self, project_name: str, api_key: str, api_secret: str):
+        """Affiche les credentials de manière sécurisée"""
+        print("\n" + "="*70)
+        print("🔑 CREDENTIALS GÉNÉRÉES - À SAUVEGARDER IMMÉDIATEMENT")
+        print("="*70)
+        print(f"Projet: {project_name}")
+        print(f"API Key: {api_key}")
+        print(f"API Secret: {api_secret}")
+        print(f"Créé le: {datetime.now().isoformat()}")
+        print("="*70)
+        print("⚠️  IMPORTANT: Sauvegardez ces credentials dans un gestionnaire")
+        print("   de secrets sécurisé. Ils ne seront plus affichés.")
+        print("="*70)
     
     def delete_tenant(self, project_name: str) -> bool:
         """Supprime un tenant (service account et credentials Vault)"""
@@ -398,23 +351,25 @@ class ConfluentTenantManager:
     
     def list_tenant_resources(self, project_name: str) -> Dict:
         """Liste les ressources d'un tenant"""
-        credentials = self.credential_manager.get_api_credentials(project_name)
+        # Rechercher le service account associé
+        sa_name = f"{project_name}-service-account"
+        service_account = self.confluent.get_service_account_by_name(sa_name)
         
-        if not credentials:
-            logger.error(f"Aucune credential trouvée pour {project_name}")
+        if not service_account:
+            logger.error(f"Aucun service account trouvé pour {project_name}")
             return {}
         
         return {
             "project_name": project_name,
-            "api_key": credentials.get('api_key'),
-            "storage_type": self.credential_manager.config.storage_type,
+            "service_account_id": service_account['id'],
+            "service_account_name": service_account['display_name'],
             "topic_prefix": f"{project_name}-*",
             "consumer_group_prefix": f"{project_name}-*",
-            "created_at": credentials.get('created_at')
+            "created_at": service_account.get('metadata', {}).get('created_at', 'N/A')
         }
 
 
-def load_configuration() -> Tuple[ConfluentConfig, CredentialStorage]:
+def load_configuration() -> ConfluentConfig:
     """Charge la configuration depuis les variables d'environnement"""
     load_dotenv()
     
@@ -423,12 +378,6 @@ def load_configuration() -> Tuple[ConfluentConfig, CredentialStorage]:
         api_key=os.getenv('CONFLUENT_API_KEY'),
         api_secret=os.getenv('CONFLUENT_API_SECRET'),
         base_url=os.getenv('CONFLUENT_BASE_URL', 'https://api.confluent.cloud')
-    )
-    
-    # Configuration du stockage des credentials
-    credential_storage = CredentialStorage(
-        storage_type=os.getenv('CREDENTIAL_STORAGE_TYPE', 'display'),
-        storage_path=os.getenv('CREDENTIAL_STORAGE_PATH', './credentials')
     )
     
     # Validation
@@ -441,7 +390,7 @@ def load_configuration() -> Tuple[ConfluentConfig, CredentialStorage]:
     if missing_vars:
         raise ValueError(f"Variables d'environnement manquantes: {', '.join(missing_vars)}")
     
-    return confluent_config, credential_storage
+    return confluent_config
 
 
 def main():
@@ -467,10 +416,6 @@ Exemples d'utilisation:
                               help='ID du cluster Kafka (ex: lkc-xxxxx)')
     create_parser.add_argument('--environment-id',
                               help='ID de l\'environnement pour Schema Registry')
-    create_parser.add_argument('--storage-type', 
-                              choices=['display', 'file', 'local'],
-                              default='display',
-                              help='Mode de stockage des credentials (défaut: display)')
     
     # Commande list
     list_parser = subparsers.add_parser('list', help='Lister les ressources d\'un tenant')
@@ -490,14 +435,10 @@ Exemples d'utilisation:
     
     try:
         # Charger la configuration
-        confluent_config, credential_storage = load_configuration()
-        
-        # Override du type de stockage si spécifié en argument
-        if hasattr(args, 'storage_type') and args.storage_type:
-            credential_storage.storage_type = args.storage_type
+        confluent_config = load_configuration()
         
         # Initialiser le gestionnaire
-        manager = ConfluentTenantManager(confluent_config, credential_storage)
+        manager = ConfluentTenantManager(confluent_config)
         
         # Exécuter la commande
         if args.command == 'create':
@@ -509,18 +450,25 @@ Exemples d'utilisation:
             print(f"✅ Tenant créé avec succès:")
             print(f"   Service Account ID: {result['service_account']['id']}")
             print(f"   API Key ID: {result['api_key_id']}")
-            print(f"   Mode de stockage: {result['storage_type']}")
-            if result['storage_type'] == 'file':
-                print(f"   Fichier credentials: ./credentials/{args.project}.json")
+            print(f"   Cluster ID: {result['cluster_id']}")
+            
+            if result.get('rbac_applied'):
+                print(f"   ✅ Permissions RBAC appliquées automatiquement")
+            else:
+                print(f"   ⚠️  Permissions RBAC à configurer manuellement")
+                print(f"   📋 Actions requises dans la console Confluent Cloud:")
+                print(f"      - Service Account: {result['service_account']['id']}")
+                print(f"      - Topics: {args.project}-* (Read/Write)")
+                print(f"      - Consumer Groups: {args.project}-* (Read/Write)")
             
         elif args.command == 'list':
             result = manager.list_tenant_resources(args.project)
             if result:
                 print(f"📋 Ressources du tenant {args.project}:")
-                print(f"   API Key: {result['api_key']}")
+                print(f"   Service Account ID: {result['service_account_id']}")
+                print(f"   Service Account Name: {result['service_account_name']}")
                 print(f"   Topic Prefix: {result['topic_prefix']}")
                 print(f"   Consumer Group Prefix: {result['consumer_group_prefix']}")
-                print(f"   Mode de stockage: {result['storage_type']}")
                 if result.get('created_at'):
                     print(f"   Créé le: {result['created_at']}")
             else:
