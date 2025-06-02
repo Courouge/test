@@ -98,24 +98,53 @@ class ConfluentCloudAPI:
         logger.info(f"API Key créée: {api_key['id']}")
         return api_key
     
+    def get_cluster_info(self, cluster_id: str) -> Dict:
+        """Récupère les informations détaillées d'un cluster"""
+        url = f"{self.config.base_url}/cmk/v2/clusters/{cluster_id}"
+        response = self.session.get(url)
+        response.raise_for_status()
+        return response.json()
+    
+    def get_environment_info(self, environment_id: str) -> Dict:
+        """Récupère les informations d'un environnement"""
+        url = f"{self.config.base_url}/org/v2/environments/{environment_id}"
+        response = self.session.get(url)
+        response.raise_for_status()
+        return response.json()
+    
     def create_role_binding(self, principal: str, role_name: str, resource_type: str, 
-                          resource_pattern: str, cluster_id: str, pattern_type: str = "LITERAL") -> Dict:
+                          resource_pattern: str, cluster_id: str, environment_id: str = None, pattern_type: str = "LITERAL") -> Dict:
         """Crée un role binding pour un principal sur une ressource"""
         url = f"{self.config.base_url}/iam/v2/role-bindings"
         
-        # Construction du CRN en fonction du type de ressource
+        # Si environment_id n'est pas fourni, essayer de le récupérer du cluster
+        if not environment_id:
+            try:
+                cluster_info = self.get_cluster_info(cluster_id)
+                environment_id = cluster_info.get('spec', {}).get('environment', {}).get('id')
+                if environment_id:
+                    logger.info(f"Environment ID détecté automatiquement: {environment_id}")
+                else:
+                    logger.warning("Impossible de détecter l'environment ID automatiquement")
+            except Exception as e:
+                logger.warning(f"Erreur lors de la récupération des infos cluster: {e}")
+        
+        # Construction du CRN selon la documentation officielle Confluent
         if resource_type == "topic":
             if pattern_type == "PREFIXED":
-                crn_pattern = f"crn://confluent.cloud/organization=*/environment=*/cloud-cluster=*/kafka-cluster={cluster_id}/topic={resource_pattern}"
+                # Pattern pour topics avec préfixe
+                crn_pattern = f"crn://confluent.cloud/organization=*/environment={environment_id or '*'}/cloud-cluster={cluster_id}/kafka={cluster_id}/topic={resource_pattern}"
             else:
-                crn_pattern = f"crn://confluent.cloud/organization=*/environment=*/cloud-cluster=*/kafka-cluster={cluster_id}/topic={resource_pattern}"
+                crn_pattern = f"crn://confluent.cloud/organization=*/environment={environment_id or '*'}/cloud-cluster={cluster_id}/kafka={cluster_id}/topic={resource_pattern}"
         elif resource_type == "consumer-group":
             if pattern_type == "PREFIXED":
-                crn_pattern = f"crn://confluent.cloud/organization=*/environment=*/cloud-cluster=*/kafka-cluster={cluster_id}/group={resource_pattern}"
+                # Pattern pour consumer groups avec préfixe  
+                crn_pattern = f"crn://confluent.cloud/organization=*/environment={environment_id or '*'}/cloud-cluster={cluster_id}/kafka={cluster_id}/group={resource_pattern}"
             else:
-                crn_pattern = f"crn://confluent.cloud/organization=*/environment=*/cloud-cluster=*/kafka-cluster={cluster_id}/group={resource_pattern}"
+                crn_pattern = f"crn://confluent.cloud/organization=*/environment={environment_id or '*'}/cloud-cluster={cluster_id}/kafka={cluster_id}/group={resource_pattern}"
         elif resource_type == "kafka-cluster":
-            crn_pattern = f"crn://confluent.cloud/organization=*/environment=*/cloud-cluster=*/kafka-cluster={cluster_id}"
+            # Permission sur le cluster entier
+            crn_pattern = f"crn://confluent.cloud/organization=*/environment={environment_id or '*'}/cloud-cluster={cluster_id}"
         else:
             raise ValueError(f"Type de ressource non supporté: {resource_type}")
         
@@ -125,7 +154,7 @@ class ConfluentCloudAPI:
             "crn_pattern": crn_pattern
         }
         
-        logger.debug(f"Tentative de création role binding: {payload}")
+        logger.debug(f"Tentative de création role binding: {json.dumps(payload, indent=2)}")
         
         response = self.session.post(url, json=payload)
         
@@ -236,17 +265,28 @@ class ConfluentTenantManager:
         """Applique les permissions RBAC pour un tenant"""
         logger.info(f"Application des permissions RBAC pour {project_name}")
         
-        # Vérifier d'abord les permissions de l'API Key en cours
+        # Récupérer l'environment ID si pas fourni
+        if not environment_id:
+            try:
+                cluster_info = self.confluent.get_cluster_info(cluster_id)
+                environment_id = cluster_info.get('spec', {}).get('environment', {}).get('id')
+                if environment_id:
+                    logger.info(f"Environment ID détecté: {environment_id}")
+                else:
+                    logger.warning("Impossible de détecter l'environment ID")
+            except Exception as e:
+                logger.warning(f"Erreur lors de la récupération de l'environment ID: {e}")
+        
+        # Vérifier d'abord les permissions de l'API Key
         logger.info("Vérification des permissions de l'API Key...")
         try:
-            # Test avec une permission de base
             response = self.confluent.session.get(f"{self.confluent.config.base_url}/iam/v2/role-bindings")
             if response.status_code != 200:
                 logger.warning(f"API Key semble avoir des permissions limitées: {response.status_code}")
         except Exception as e:
             logger.warning(f"Impossible de vérifier les permissions: {e}")
         
-        # Essayer des rôles plus simples d'abord
+        # Permissions de base avec environnement
         basic_roles = [
             ("DeveloperRead", "topic", f"{project_name}-*"),
             ("DeveloperWrite", "topic", f"{project_name}-*"),
@@ -265,6 +305,7 @@ class ConfluentTenantManager:
                     resource_type=resource_type,
                     resource_pattern=pattern,
                     cluster_id=cluster_id,
+                    environment_id=environment_id,
                     pattern_type="PREFIXED"
                 )
                 successful_bindings += 1
@@ -272,48 +313,72 @@ class ConfluentTenantManager:
                 
             except requests.exceptions.HTTPError as e:
                 failed_bindings += 1
+                error_details = ""
+                try:
+                    error_body = e.response.json()
+                    error_details = error_body.get('detail', '')
+                except:
+                    error_details = e.response.text
+                
                 if e.response.status_code == 403:
                     logger.error(f"❌ Permissions insuffisantes pour créer le role binding {role_name}")
-                    logger.error(f"   Votre API Key n'a pas les permissions 'OrganizationAdmin' ou 'EnvironmentAdmin'")
-                    logger.error(f"   Ressource: {resource_type}:{pattern}")
+                    logger.error(f"   Détails: {error_details}")
+                    
+                    # Suggestions spécifiques selon l'erreur
+                    if "OrganizationAdmin" in error_details:
+                        logger.error(f"   Votre API Key doit avoir le rôle 'OrganizationAdmin'")
+                    elif "EnvironmentAdmin" in error_details:
+                        logger.error(f"   Votre API Key doit avoir le rôle 'EnvironmentAdmin' sur l'environment {environment_id}")
+                    else:
+                        logger.error(f"   Vérifiez que votre API Key a les permissions 'OrganizationAdmin' ou 'EnvironmentAdmin'")
+                        
                 elif e.response.status_code == 409:
                     logger.info(f"ℹ️  Role binding {role_name} déjà existant pour {pattern}")
                     successful_bindings += 1
                 elif e.response.status_code == 422:
-                    logger.warning(f"⚠️  Role ou ressource invalide: {role_name} sur {resource_type}:{pattern}")
-                    # Essayer avec un rôle alternatif
-                    if role_name == "DeveloperManage":
-                        logger.info(f"Tentative avec ResourceOwner à la place de DeveloperManage...")
+                    logger.warning(f"⚠️  Erreur de validation: {error_details}")
+                    logger.warning(f"   Role: {role_name}, Resource: {resource_type}:{pattern}")
+                    
+                    # Essayer des rôles alternatifs
+                    if role_name.startswith("Developer"):
+                        alternative_role = role_name.replace("Developer", "Resource")
+                        logger.info(f"Tentative avec le rôle alternatif: {alternative_role}")
                         try:
                             self.confluent.create_role_binding(
                                 principal=service_account_id,
-                                role_name="ResourceOwner",
+                                role_name=alternative_role,
                                 resource_type=resource_type,
                                 resource_pattern=pattern,
                                 cluster_id=cluster_id,
+                                environment_id=environment_id,
                                 pattern_type="PREFIXED"
                             )
                             successful_bindings += 1
-                            logger.info(f"✅ Role binding ResourceOwner créé avec succès")
+                            logger.info(f"✅ Role binding {alternative_role} créé avec succès")
                         except Exception as e2:
-                            logger.warning(f"Échec aussi avec ResourceOwner: {e2}")
+                            logger.warning(f"Échec aussi avec {alternative_role}: {e2}")
                 else:
-                    logger.warning(f"Erreur lors de la création du role binding {role_name}: {e.response.status_code} - {e.response.text}")
+                    logger.warning(f"Erreur {e.response.status_code} lors de la création du role binding {role_name}: {error_details}")
             except Exception as e:
                 failed_bindings += 1
                 logger.error(f"Erreur inattendue lors de la création du role binding {role_name}: {e}")
         
-        # Résumé
+        # Résumé avec instructions détaillées
         total_attempted = len(basic_roles)
         if successful_bindings > 0:
             logger.info(f"✅ {successful_bindings}/{total_attempted} permissions RBAC appliquées avec succès")
         else:
             logger.error(f"❌ Aucune permission RBAC n'a pu être appliquée ({failed_bindings} échecs)")
             logger.error("🔧 ACTIONS REQUISES:")
-            logger.error("   1. Vérifiez que votre API Key a les permissions 'OrganizationAdmin'")
-            logger.error("   2. Ou appliquez les permissions manuellement dans la console Confluent Cloud")
-            logger.error(f"   3. Service Account à configurer: {service_account_id}")
-            logger.error(f"   4. Ressources: topics et consumer groups avec préfixe '{project_name}-*'")
+            logger.error("   1. Vérifiez que votre API Key a l'un de ces rôles:")
+            logger.error("      - OrganizationAdmin (sur toute l'organisation)")
+            logger.error(f"      - EnvironmentAdmin (sur l'environment {environment_id or 'requis'})")
+            logger.error("   2. OU configurez manuellement dans la console Confluent Cloud:")
+            logger.error(f"      - Service Account: {service_account_id}")
+            logger.error(f"      - Environment: {environment_id or 'requis'}")
+            logger.error(f"      - Cluster: {cluster_id}")
+            logger.error(f"      - Topics: {project_name}-* (DeveloperRead, DeveloperWrite)")
+            logger.error(f"      - Consumer Groups: {project_name}-* (DeveloperRead, DeveloperWrite)")
         
         return successful_bindings > 0
     
