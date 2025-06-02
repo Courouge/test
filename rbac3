@@ -5,165 +5,209 @@ import json
 api_key = "VOTRE_API_KEY"
 api_secret = "VOTRE_API_SECRET"
 
-def debug_role_bindings():
+def explore_all_resources():
     base_url = "https://api.confluent.cloud"
     auth = HTTPBasicAuth(api_key, api_secret)
-    
-    print("=== DEBUG ROLE BINDINGS ===\n")
-    
-    # Test 1: Headers différents
-    print("1. 🧪 Test avec différents headers")
-    print("-" * 40)
-    
-    header_variants = [
-        {'Content-Type': 'application/json'},
-        {'Accept': 'application/json'},
-        {'Content-Type': 'application/json', 'Accept': 'application/json'},
-        {}  # Pas de headers
-    ]
-    
-    for i, headers in enumerate(header_variants, 1):
-        print(f"\nTest {i}: Headers = {headers}")
-        
-        try:
-            response = requests.get(f"{base_url}/iam/v2/role-bindings", auth=auth, headers=headers)
-            print(f"   Status: {response.status_code}")
-            
-            if response.status_code == 200:
-                try:
-                    data = response.json()
-                    bindings = data.get('data', [])
-                    print(f"   ✅ Succès! {len(bindings)} role binding(s)")
-                    
-                    if bindings and len(bindings) <= 2:  # Afficher si peu de résultats
-                        for binding in bindings:
-                            print(f"      - {binding.get('principal')} → {binding.get('role_name')}")
-                    break  # Sortir dès qu'on a du succès
-                    
-                except Exception as e:
-                    print(f"   ⚠️  JSON Error: {e}")
-                    print(f"   Raw: {response.text[:200]}...")
-            else:
-                print(f"   ❌ Error: {response.text[:200]}...")
-                
-        except Exception as e:
-            print(f"   💥 Request Error: {e}")
-    
-    print("\n" + "="*60 + "\n")
-    
-    # Test 2: Méthodes HTTP différentes
-    print("2. 🧪 Test avec méthodes HTTP différentes")
-    print("-" * 50)
-    
-    headers = {'Accept': 'application/json'}  # Utiliser Accept au lieu de Content-Type
-    
-    methods = ['GET', 'POST']
-    for method in methods:
-        print(f"\nTest {method}:")
-        
-        try:
-            if method == 'GET':
-                response = requests.get(f"{base_url}/iam/v2/role-bindings", auth=auth, headers=headers)
-            else:
-                # POST avec body vide
-                response = requests.post(f"{base_url}/iam/v2/role-bindings", auth=auth, headers=headers, json={})
-            
-            print(f"   Status: {response.status_code}")
-            print(f"   Response: {response.text[:300]}...")
-            
-        except Exception as e:
-            print(f"   Error: {e}")
-    
-    print("\n" + "="*60 + "\n")
-    
-    # Test 3: Avec paramètres simples
-    print("3. 🧪 Test avec paramètres simples")
-    print("-" * 40)
-    
     headers = {'Accept': 'application/json'}
     
-    # Récupérer d'abord les utilisateurs pour avoir un principal valide
-    user_response = requests.get(f"{base_url}/iam/v2/users", auth=auth, headers=headers)
-    
-    test_principal = None
-    if user_response.status_code == 200:
-        users = user_response.json().get('data', [])
-        if users:
-            test_principal = f"User:{users[0].get('id')}"
-            print(f"Principal de test trouvé: {test_principal}")
-    
-    param_tests = [
-        {},  # Aucun paramètre
-        {'page_size': '10'},  # Pagination
-        {'principal': test_principal} if test_principal else {'role_name': 'OrganizationAdmin'},  # Filtre simple
+    # Liste exhaustive des endpoints à tester
+    endpoints = [
+        # IAM v2
+        ("/iam/v2/users", "Users"),
+        ("/iam/v2/service-accounts", "Service Accounts"),
+        ("/iam/v2/api-keys", "API Keys"),
+        ("/iam/v2/role-bindings", "Role Bindings v2"),
+        ("/iam/v2/roles", "Roles v2"),
+        ("/iam/v2/identity-pools", "Identity Pools"),
+        ("/iam/v2/identity-providers", "Identity Providers"),
+        ("/iam/v2/invitations", "Invitations"),
+        
+        # IAM v1 (fallback)
+        ("/iam/v1/role-bindings", "Role Bindings v1"),
+        ("/iam/v1/roles", "Roles v1"),
+        
+        # RBAC (alternative)
+        ("/rbac/v1/role-bindings", "RBAC Role Bindings"),
+        ("/rbac/v1/principals", "RBAC Principals"),
+        
+        # Organisation
+        ("/org/v2/organizations", "Organizations"),
+        ("/org/v2/environments", "Environments"),
+        
+        # Clusters & Resources
+        ("/cmk/v2/clusters", "Kafka Clusters"),
+        ("/srcm/v2/clusters", "Schema Registry Clusters"),
+        ("/connect/v1/environments", "Connect Environments"),
+        ("/ksqldb/v2/clusters", "ksqlDB Clusters"),
+        
+        # Kafka Resources
+        ("/kafka/v3/clusters", "Kafka v3 Clusters"),
+        ("/kafka/v3/topics", "Kafka Topics"),
+        ("/kafka/v3/consumer-groups", "Consumer Groups"),
+        ("/kafka/v3/acls", "Kafka ACLs"),
+        
+        # Metrics & Monitoring
+        ("/metrics/v2/export", "Metrics Export"),
+        ("/metrics/v2/descriptors", "Metrics Descriptors"),
+        
+        # Billing & Usage
+        ("/billing/v1/costs", "Billing Costs"),
+        ("/billing/v1/payment-methods", "Payment Methods"),
+        
+        # Networking
+        ("/networking/v1/networks", "Networks"),
+        ("/networking/v1/peerings", "Peerings"),
+        ("/networking/v1/private-link-accesses", "Private Link"),
+        
+        # Connectors
+        ("/connect/v1/connectors", "Connectors"),
+        ("/connect/v1/connector-plugins", "Connector Plugins"),
+        
+        # Schema Registry
+        ("/subject-config", "SR Subject Config"),
+        ("/subjects", "SR Subjects"),
+        ("/schemas", "SR Schemas"),
+        
+        # Data Catalog
+        ("/catalog/v1/entity", "Data Catalog Entities"),
+        ("/catalog/v1/search", "Data Catalog Search"),
+        
+        # Stream Governance
+        ("/sg/v1/clusters", "Stream Governance"),
+        
+        # Pipelines
+        ("/sd/v1/pipelines", "Stream Designer Pipelines"),
+        
+        # Audit Logs
+        ("/service/audit/v1/audit-logs", "Audit Logs"),
     ]
     
-    for i, params in enumerate(param_tests, 1):
-        print(f"\nTest {i}: Params = {params}")
-        
+    print("=== EXPLORATION COMPLÈTE CONFLUENT CLOUD ===")
+    print(f"Total endpoints à tester: {len(endpoints)}\n")
+    
+    results = {
+        'success': [],
+        'forbidden': [],
+        'not_found': [],
+        'error': []
+    }
+    
+    for endpoint, name in endpoints:
         try:
-            response = requests.get(f"{base_url}/iam/v2/role-bindings", 
-                                    auth=auth, headers=headers, params=params)
-            print(f"   Status: {response.status_code}")
-            print(f"   URL finale: {response.url}")
+            response = requests.get(f"{base_url}{endpoint}", auth=auth, headers=headers, timeout=10)
             
-            if response.status_code == 200:
+            status = response.status_code
+            
+            if status == 200:
                 try:
                     data = response.json()
-                    bindings = data.get('data', [])
-                    print(f"   ✅ Succès! {len(bindings)} résultat(s)")
-                    
-                    if bindings:
-                        print("   📋 Exemple de role binding:")
-                        binding = bindings[0]
-                        for key, value in binding.items():
-                            print(f"      {key}: {value}")
-                        break
-                    
-                except Exception as e:
-                    print(f"   JSON Error: {e}")
-            else:
-                print(f"   ❌ Erreur: {response.text[:200]}...")
-                
-        except Exception as e:
-            print(f"   Request Error: {e}")
-    
-    print("\n" + "="*60 + "\n")
-    
-    # Test 4: Vérifier la version de l'API
-    print("4. 🧪 Test versions d'API alternatives")
-    print("-" * 45)
-    
-    api_versions = [
-        "/iam/v2/role-bindings",
-        "/iam/v1/role-bindings",  # Version antérieure
-        "/rbac/v1/role-bindings",  # Autre endpoint possible
-    ]
-    
-    headers = {'Accept': 'application/json'}
-    
-    for endpoint in api_versions:
-        print(f"\nTest: {endpoint}")
-        
-        try:
-            response = requests.get(f"{base_url}{endpoint}", auth=auth, headers=headers)
-            print(f"   Status: {response.status_code}")
-            
-            if response.status_code == 200:
-                print(f"   ✅ Endpoint valide!")
-                try:
-                    data = response.json()
-                    if 'data' in data:
-                        print(f"   📊 {len(data['data'])} élément(s)")
+                    if isinstance(data, dict) and 'data' in data:
+                        count = len(data['data'])
+                        results['success'].append(f"✅ {name:<25} → {count:>3} items")
+                    elif isinstance(data, list):
+                        count = len(data)
+                        results['success'].append(f"✅ {name:<25} → {count:>3} items")
+                    else:
+                        results['success'].append(f"✅ {name:<25} → OK (non-standard)")
                 except:
-                    pass
-            elif response.status_code == 404:
-                print(f"   ⚠️  Endpoint non trouvé")
+                    results['success'].append(f"✅ {name:<25} → OK (non-JSON)")
+                    
+            elif status == 403:
+                results['forbidden'].append(f"🔒 {name:<25} → Forbidden")
+            elif status == 404:
+                results['not_found'].append(f"❌ {name:<25} → Not Found")
+            elif status == 400:
+                results['error'].append(f"⚠️  {name:<25} → Bad Request")
+            elif status == 401:
+                results['error'].append(f"🔑 {name:<25} → Unauthorized")
             else:
-                print(f"   ❌ {response.text[:100]}...")
+                results['error'].append(f"❓ {name:<25} → HTTP {status}")
                 
+        except requests.exceptions.Timeout:
+            results['error'].append(f"⏱️  {name:<25} → Timeout")
         except Exception as e:
-            print(f"   Error: {e}")
+            results['error'].append(f"💥 {name:<25} → {str(e)[:20]}...")
+    
+    # Affichage compact des résultats
+    print("🟢 ENDPOINTS FONCTIONNELS:")
+    print("-" * 45)
+    for result in results['success']:
+        print(result)
+    
+    if results['forbidden']:
+        print(f"\n🔒 ACCÈS REFUSÉ ({len(results['forbidden'])}):")
+        print("-" * 30)
+        for result in results['forbidden']:
+            print(result)
+    
+    if results['not_found']:
+        print(f"\n❌ NON TROUVÉS ({len(results['not_found'])}):")
+        print("-" * 25)
+        for result in results['not_found']:
+            print(result)
+    
+    if results['error']:
+        print(f"\n⚠️  ERREURS ({len(results['error'])}):")
+        print("-" * 20)
+        for result in results['error']:
+            print(result)
+    
+    # Statistiques
+    total_success = len(results['success'])
+    total_accessible = total_success + len(results['forbidden'])
+    total_endpoints = len(endpoints)
+    
+    print(f"\n📊 RÉSUMÉ:")
+    print(f"   Fonctionnels: {total_success}/{total_endpoints}")
+    print(f"   Accessibles: {total_accessible}/{total_endpoints}")
+    print(f"   Taux succès: {(total_success/total_endpoints)*100:.1f}%")
+    
+    # Si on a trouvé des ressources avec role bindings ou permissions
+    print(f"\n🔍 ENDPOINTS LIÉS AUX PERMISSIONS:")
+    permission_endpoints = [r for r in results['success'] if any(word in r.lower() for word in ['role', 'rbac', 'acl', 'permission', 'auth'])]
+    if permission_endpoints:
+        for endpoint in permission_endpoints:
+            print(f"   {endpoint}")
+    else:
+        print("   Aucun endpoint de permissions trouvé")
+
+def quick_test_working_endpoints():
+    """Test rapide des endpoints qui fonctionnent"""
+    base_url = "https://api.confluent.cloud"
+    auth = HTTPBasicAuth(api_key, api_secret)
+    headers = {'Accept': 'application/json'}
+    
+    # Endpoints les plus susceptibles de contenir des infos sur les permissions
+    quick_endpoints = [
+        "/iam/v2/users",
+        "/iam/v2/service-accounts", 
+        "/org/v2/environments",
+        "/cmk/v2/clusters",
+        "/kafka/v3/acls",
+    ]
+    
+    print(f"\n{'='*60}")
+    print("🚀 TEST RAPIDE DES RESSOURCES PRINCIPALES")
+    print(f"{'='*60}")
+    
+    for endpoint in quick_endpoints:
+        try:
+            response = requests.get(f"{base_url}{endpoint}", auth=auth, headers=headers, timeout=5)
+            if response.status_code == 200:
+                data = response.json()
+                items = data.get('data', data if isinstance(data, list) else [])
+                print(f"\n📋 {endpoint.split('/')[-1].upper()}:")
+                
+                if items and len(items) <= 5:  # Afficher le détail si peu d'items
+                    for i, item in enumerate(items[:3], 1):
+                        item_id = item.get('id', 'N/A')
+                        item_name = item.get('display_name') or item.get('name') or item.get('email', 'Sans nom')
+                        print(f"   {i}. {item_name} (ID: {item_id})")
+                else:
+                    print(f"   {len(items)} élément(s) trouvé(s)")
+        except:
+            pass
 
 if __name__ == "__main__":
-    debug_role_bindings()
+    explore_all_resources()
+    quick_test_working_endpoints()
