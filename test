@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Script de test pour vérifier la configuration et les connexions (sans Vault)
+Script de test pour vérifier la configuration Confluent Cloud
 """
 
 import os
@@ -40,44 +40,9 @@ def test_confluent_connection():
         print(f"❌ Erreur de connexion Confluent Cloud: {e}")
         return False
 
-def test_storage_permissions():
-    """Test des permissions de stockage local"""
-    print("\n🔍 Test des permissions de stockage...")
-    
-    storage_path = os.getenv('CREDENTIAL_STORAGE_PATH', './credentials')
-    
-    try:
-        # Créer le répertoire s'il n'existe pas
-        if not os.path.exists(storage_path):
-            os.makedirs(storage_path, mode=0o700)
-            print(f"✅ Répertoire créé: {storage_path}")
-        
-        # Test d'écriture
-        test_file = os.path.join(storage_path, 'test.txt')
-        with open(test_file, 'w') as f:
-            f.write('test')
-        
-        # Test de lecture
-        with open(test_file, 'r') as f:
-            content = f.read()
-        
-        # Nettoyage
-        os.remove(test_file)
-        
-        if content == 'test':
-            print("✅ Permissions de stockage OK")
-            return True
-        else:
-            print("❌ Erreur lors du test de lecture/écriture")
-            return False
-            
-    except Exception as e:
-        print(f"❌ Erreur de permissions de stockage: {e}")
-        return False
-
 def test_environment_variables():
     """Vérification des variables d'environnement"""
-    print("\n🔍 Vérification des variables d'environnement...")
+    print("🔍 Vérification des variables d'environnement...")
     
     required_vars = [
         'CONFLUENT_API_KEY',
@@ -85,8 +50,6 @@ def test_environment_variables():
     ]
     
     optional_vars = [
-        'CREDENTIAL_STORAGE_TYPE',
-        'CREDENTIAL_STORAGE_PATH',
         'CONFLUENT_BASE_URL'
     ]
     
@@ -115,15 +78,87 @@ def test_environment_variables():
         print(f"\n❌ Variables obligatoires manquantes: {', '.join(missing_vars)}")
         return False
     else:
-        print("\n✅ Toutes les variables obligatoires sont présentes")
+        print("✅ Toutes les variables obligatoires sont présentes")
         return True
 
-def test_credential_storage_config():
-    """Test de la configuration du stockage des credentials"""
-    print("\n🔍 Test de la configuration du stockage...")
+def test_cluster_access():
+    """Test d'accès aux clusters"""
+    print("\n🔍 Test d'accès aux clusters...")
     
-    storage_type = os.getenv('CREDENTIAL_STORAGE_TYPE', 'display')
-    storage_path = os.getenv('CREDENTIAL_STORAGE_PATH', './credentials')
+    api_key = os.getenv('CONFLUENT_API_KEY')
+    api_secret = os.getenv('CONFLUENT_API_SECRET')
+    
+    try:
+        response = requests.get(
+            "https://api.confluent.cloud/cmk/v2/clusters",
+            auth=HTTPBasicAuth(api_key, api_secret),
+            headers={'Accept': 'application/json'}
+        )
+        
+        if response.status_code == 200:
+            data = response.json()
+            clusters = data.get('data', [])
+            print(f"✅ Accès aux clusters réussi")
+            print(f"   Nombre de clusters disponibles: {len(clusters)}")
+            
+            if clusters:
+                print("   Clusters disponibles:")
+                for cluster in clusters[:3]:  # Afficher les 3 premiers seulement
+                    print(f"     - {cluster.get('id', 'N/A')} ({cluster.get('display_name', 'N/A')})")
+                if len(clusters) > 3:
+                    print(f"     ... et {len(clusters) - 3} autres")
+            
+            return True
+        else:
+            print(f"❌ Erreur d'accès aux clusters: {response.status_code}")
+            return False
+            
+    except Exception as e:
+        print(f"❌ Erreur lors du test d'accès aux clusters: {e}")
+        return False
+
+def main():
+    """Point d'entrée principal"""
+    print("🧪 Script de test de configuration Confluent Cloud\n")
+    
+    # Charger les variables d'environnement
+    load_dotenv()
+    
+    # Tests
+    tests = [
+        test_environment_variables,
+        test_confluent_connection,
+        test_cluster_access
+    ]
+    
+    results = []
+    for test in tests:
+        try:
+            result = test()
+            results.append(result)
+        except Exception as e:
+            print(f"❌ Erreur lors du test: {e}")
+            results.append(False)
+    
+    # Résumé
+    print("\n" + "="*50)
+    print("📊 Résumé des tests:")
+    
+    if all(results):
+        print("✅ Tous les tests sont passés avec succès!")
+        print("🚀 Vous pouvez maintenant utiliser le script create_tenant.py")
+        print("\n💡 Exemples d'utilisation:")
+        print("   python create_tenant.py create --project my-project --cluster-id lkc-xxxxx")
+        print("   python create_tenant.py list --project my-project")
+        print("   python create_tenant.py delete --project my-project")
+        sys.exit(0)
+    else:
+        print("❌ Certains tests ont échoué.")
+        print("🔧 Veuillez corriger les erreurs avant d'utiliser le script principal.")
+        sys.exit(1)
+
+if __name__ == "__main__":
+    main()STORAGE_PATH', './credentials')
     
     print(f"   Mode de stockage: {storage_type}")
     
