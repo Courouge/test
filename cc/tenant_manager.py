@@ -27,16 +27,50 @@ class TenantConfig:
     project_name: str
     cluster_id: str
     environment_id: Optional[str] = None
+    organization_id: Optional[str] = None
 
 class UnifiedTenantManager:
     """Gestionnaire unifié pour les tenants et RBAC"""
 
-    def __init__(self, api_key: str, api_secret: str):
+    def __init__(self, api_key: str, api_secret: str, organization_id: str = None):
         self.config = ConfluentConfig(api_key=api_key, api_secret=api_secret)
         self.tenant_manager = ConfluentTenantManager(self.config)
         self.rbac_manager = ConfluentRoleBindingManager(api_key, api_secret)
         self.resource_helper = ConfluentResourceHelper()
         self.api = ConfluentCloudAPI(self.config)
+        self.organization_id = organization_id or self._get_organization_id()
+
+    def _get_organization_id(self) -> str:
+        """
+        Récupère automatiquement l'ID d'organisation depuis l'API
+        
+        Returns:
+            L'ID de l'organisation
+        """
+        try:
+            import requests
+            from requests.auth import HTTPBasicAuth
+            
+            response = requests.get(
+                "https://api.confluent.cloud/org/v2/organizations",
+                auth=HTTPBasicAuth(self.config.api_key, self.config.api_secret),
+                headers={'Accept': 'application/json'}
+            )
+            
+            if response.status_code == 200:
+                data = response.json()
+                orgs = data.get('data', [])
+                if orgs:
+                    org_id = orgs[0]['id']
+                    logger.info(f"Organisation ID récupérée automatiquement: {org_id}")
+                    return org_id
+                    
+            logger.warning("Impossible de récupérer l'ID d'organisation, utilisation de 'org' par défaut")
+            return "org"
+            
+        except Exception as e:
+            logger.warning(f"Erreur lors de la récupération de l'organisation: {str(e)}, utilisation de 'org' par défaut")
+            return "org"
 
     def _format_service_account_name(self, project_name: str) -> str:
         """
@@ -86,6 +120,7 @@ class UnifiedTenantManager:
     def _setup_tenant_permissions(self, service_account_id: str, project_name: str, cluster_id: str, environment_id: str = None):
         """
         Configure les permissions pour le tenant avec isolation
+        Utilise uniquement les rôles nécessaires et évite les erreurs 403
         
         Args:
             service_account_id: ID du service account
@@ -94,68 +129,65 @@ class UnifiedTenantManager:
             environment_id: ID de l'environnement (optionnel)
         """
         try:
-            # 1. Permissions sur le cluster (lecture seule)
-            cluster_crn = self.resource_helper.kafka_cluster_crn(
-                org_id="*",
-                env_id=environment_id or "*",
-                cluster_id=cluster_id
-            )
-            logger.info(f"Configuration des permissions CloudClusterAdmin pour {service_account_id}")
-            self.rbac_manager.create_role_binding(
-                principal=f"User:{service_account_id}",
-                role_name="CloudClusterAdmin",
-                crn_pattern=cluster_crn
-            )
-
-            # 2. Permissions sur l'environnement si spécifié
-            if environment_id:
-                env_crn = self.resource_helper.environment_crn(
-                    org_id="*",
-                    env_id=environment_id
-                )
-                logger.info(f"Configuration des permissions EnvironmentAdmin pour {service_account_id}")
-                self.rbac_manager.create_role_binding(
-                    principal=f"User:{service_account_id}",
-                    role_name="EnvironmentAdmin",
-                    crn_pattern=env_crn
-                )
-
-            # 3. Permissions sur les topics avec préfixe (lecture/écriture)
-            topic_crn = self.resource_helper.kafka_topic_crn(
-                org_id="*",
+            org_id = self.organization_id
+            
+            # 1. Permissions DeveloperRead pour les topics avec préfixe
+            topic_read_crn = self.resource_helper.kafka_topic_crn(
+                org_id=org_id,
                 env_id=environment_id or "*",
                 cluster_id=cluster_id,
                 topic_name=f"{project_name}.*"
             )
-            logger.info(f"Configuration des permissions DeveloperRead pour les topics avec préfixe {project_name}.*")
+            logger.info(f"Configuration DeveloperRead pour topics avec préfixe {project_name}.*")
             self.rbac_manager.create_role_binding(
                 principal=f"User:{service_account_id}",
                 role_name="DeveloperRead",
-                crn_pattern=topic_crn
+                crn_pattern=topic_read_crn
             )
 
-            # 4. Permissions sur les consumer groups avec préfixe
+            # 2. Permissions DeveloperWrite pour les topics avec préfixe
+            topic_write_crn = self.resource_helper.kafka_topic_crn(
+                org_id=org_id,
+                env_id=environment_id or "*",
+                cluster_id=cluster_id,
+                topic_name=f"{project_name}.*"
+            )
+            logger.info(f"Configuration DeveloperWrite pour topics avec préfixe {project_name}.*")
+            self.rbac_manager.create_role_binding(
+                principal=f"User:{service_account_id}",
+                role_name="DeveloperWrite",
+                crn_pattern=topic_write_crn
+            )
+
+            # 3. Permissions DeveloperRead pour les consumer groups avec préfixe
             group_crn = self.resource_helper.kafka_consumer_group_crn(
-                org_id="*",
+                org_id=org_id,
                 env_id=environment_id or "*",
                 cluster_id=cluster_id,
                 consumer_group=f"{project_name}.*"
             )
-            logger.info(f"Configuration des permissions DeveloperRead pour les consumer groups avec préfixe {project_name}.*")
+            logger.info(f"Configuration DeveloperRead pour consumer groups avec préfixe {project_name}.*")
             self.rbac_manager.create_role_binding(
                 principal=f"User:{service_account_id}",
                 role_name="DeveloperRead",
                 crn_pattern=group_crn
             )
 
-            # 5. Permissions sur les schemas avec préfixe
-            schema_crn = f"crn://confluent.cloud/organization=*/environment={environment_id or '*'}/schema-registry=*/subject={project_name}.*"
-            logger.info(f"Configuration des permissions DeveloperRead pour les schemas avec préfixe {project_name}.*")
+            # 4. Permissions DeveloperWrite pour les transactional IDs (optionnel mais utile)
+            tx_id_crn = self.resource_helper.kafka_transactional_id_crn(
+                org_id=org_id,
+                env_id=environment_id or "*",
+                cluster_id=cluster_id,
+                transactional_id=f"{project_name}.*"
+            )
+            logger.info(f"Configuration DeveloperWrite pour transactional IDs avec préfixe {project_name}.*")
             self.rbac_manager.create_role_binding(
                 principal=f"User:{service_account_id}",
-                role_name="DeveloperRead",
-                crn_pattern=schema_crn
+                role_name="DeveloperWrite",
+                crn_pattern=tx_id_crn
             )
+
+            logger.info(f"✅ Toutes les permissions configurées avec succès pour le tenant {project_name}")
 
         except Exception as e:
             logger.error(f"Erreur lors de la configuration des permissions tenant: {str(e)}")
@@ -172,6 +204,10 @@ class UnifiedTenantManager:
             Dict contenant les informations du tenant créé
         """
         try:
+            # Mettre à jour l'organization_id si fourni
+            if tenant_config.organization_id:
+                self.organization_id = tenant_config.organization_id
+
             # 1. Créer ou récupérer le service account
             service_account = self._get_or_create_service_account(tenant_config.project_name)
             service_account_id = service_account['id']
@@ -210,14 +246,15 @@ def main():
     API_KEY, API_SECRET = read_api_keys("api-key-test.txt")
     logger.info(f"Utilisation des clés API de test: {API_KEY}")
     
-    # Créer le gestionnaire unifié
-    manager = UnifiedTenantManager(API_KEY, API_SECRET)
+    # Créer le gestionnaire unifié (remplacez par votre vrai org ID)
+    manager = UnifiedTenantManager(API_KEY, API_SECRET, organization_id="org")
     
     # Configuration du tenant
     tenant_config = TenantConfig(
         project_name="taas.cagip.factory1",
         cluster_id="lkc-xwp2kx",
-        environment_id="env-036012"
+        environment_id="env-036012",
+        organization_id="org"  # Remplacez par votre vrai organization ID
     )
     
     try:
