@@ -40,9 +40,21 @@ def find_real_ids():
                 auth=auth, headers=headers
             )
             if cluster_response.status_code == 200:
-                clusters = cluster_response.json().get('data', [])
-                for cluster in clusters:
-                    print(f"      - ID: {cluster.get('id')}, Nom: {cluster.get('display_name')}")
+                try:
+                    cluster_data = cluster_response.json()
+                    if cluster_data and isinstance(cluster_data, dict):
+                        clusters = cluster_data.get('data', [])
+                        if clusters:
+                            for cluster in clusters:
+                                print(f"      - ID: {cluster.get('id')}, Nom: {cluster.get('display_name')}")
+                        else:
+                            print("      Aucun cluster trouvé dans cet environnement")
+                    else:
+                        print(f"      Réponse inattendue: {cluster_response.text}")
+                except json.JSONDecodeError:
+                    print(f"      Erreur JSON: {cluster_response.text}")
+            else:
+                print(f"      Erreur API clusters (Status {cluster_response.status_code}): {cluster_response.text}")
     
     print("\n" + "-"*50 + "\n")
     
