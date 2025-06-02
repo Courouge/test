@@ -1,0 +1,67 @@
+import requests
+from requests.auth import HTTPBasicAuth
+import json
+
+api_key = "VOTRE_API_KEY"
+api_secret = "VOTRE_API_SECRET"
+
+def find_real_ids():
+    base_url = "https://api.confluent.cloud"
+    auth = HTTPBasicAuth(api_key, api_secret)
+    headers = {'Content-Type': 'application/json'}
+    
+    print("=== RECHERCHE DES VRAIS IDENTIFIANTS ===\n")
+    
+    # 1. Trouver votre User ID
+    print("1. Recherche de votre User ID:")
+    response = requests.get(f"{base_url}/iam/v2/users", auth=auth, headers=headers)
+    if response.status_code == 200:
+        users = response.json().get('data', [])
+        print(f"Utilisateurs trouvés: {len(users)}")
+        for user in users:
+            print(f"  - ID: {user.get('id')}, Email: {user.get('email')}")
+    
+    print("\n" + "-"*50 + "\n")
+    
+    # 2. Lister vos environnements
+    print("2. Vos environnements:")
+    response = requests.get(f"{base_url}/org/v2/environments", auth=auth, headers=headers)
+    if response.status_code == 200:
+        envs = response.json().get('data', [])
+        for env in envs:
+            env_id = env.get('id')
+            env_name = env.get('display_name')
+            print(f"  - ID: {env_id}, Nom: {env_name}")
+            
+            # 3. Lister les clusters dans cet environnement
+            print(f"    Clusters dans {env_name}:")
+            cluster_response = requests.get(
+                f"{base_url}/cmk/v2/clusters?environment={env_id}",
+                auth=auth, headers=headers
+            )
+            if cluster_response.status_code == 200:
+                clusters = cluster_response.json().get('data', [])
+                for cluster in clusters:
+                    print(f"      - ID: {cluster.get('id')}, Nom: {cluster.get('display_name')}")
+    
+    print("\n" + "-"*50 + "\n")
+    
+    # 4. Lister TOUS vos role bindings pour voir la structure réelle
+    print("3. TOUS vos role bindings actuels:")
+    response = requests.get(f"{base_url}/iam/v2/role-bindings", auth=auth, headers=headers)
+    if response.status_code == 200:
+        bindings = response.json().get('data', [])
+        print(f"Total role bindings: {len(bindings)}")
+        
+        for i, binding in enumerate(bindings, 1):
+            print(f"\n  Binding #{i}:")
+            print(f"    Principal: {binding.get('principal')}")
+            print(f"    Role: {binding.get('role_name')}")
+            print(f"    CRN: {binding.get('crn_pattern')}")
+            
+            # Si c'est CloudClusterAdmin, on l'affiche en évidence
+            if binding.get('role_name') == 'CloudClusterAdmin':
+                print("    *** VOICI VOTRE ROLE BINDING CloudClusterAdmin ***")
+
+if __name__ == "__main__":
+    find_real_ids()
