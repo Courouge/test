@@ -62,6 +62,39 @@ class UnifiedTenantManager:
             description=f"Service account pour le tenant {project_name}"
         )
 
+    def _setup_admin_permissions(self, service_account_id: str, cluster_id: str, environment_id: str = None):
+        """
+        Configure les permissions d'administration pour le service account
+        
+        Args:
+            service_account_id: ID du service account
+            cluster_id: ID du cluster
+            environment_id: ID de l'environnement (optionnel)
+        """
+        # Permissions sur le cluster
+        cluster_crn = self.resource_helper.kafka_cluster_crn(
+            org_id="*",
+            env_id=environment_id or "*",
+            cluster_id=cluster_id
+        )
+        self.rbac_manager.create_role_binding(
+            principal=f"User:{service_account_id}",
+            role_name="CloudClusterAdmin",
+            crn_pattern=cluster_crn
+        )
+
+        # Permissions sur l'environnement si spécifié
+        if environment_id:
+            env_crn = self.resource_helper.environment_crn(
+                org_id="*",
+                env_id=environment_id
+            )
+            self.rbac_manager.create_role_binding(
+                principal=f"User:{service_account_id}",
+                role_name="EnvironmentAdmin",
+                crn_pattern=env_crn
+            )
+
     def create_tenant_with_rbac(self, tenant_config: TenantConfig) -> Dict:
         """
         Crée un tenant et configure ses permissions RBAC
@@ -80,7 +113,14 @@ class UnifiedTenantManager:
             # 2. Créer l'API key pour le cluster
             api_key = self.api.create_api_key(service_account_id, tenant_config.cluster_id)
             
-            # 3. Configurer les permissions RBAC
+            # 3. Configurer les permissions d'administration
+            self._setup_admin_permissions(
+                service_account_id=service_account_id,
+                cluster_id=tenant_config.cluster_id,
+                environment_id=tenant_config.environment_id
+            )
+            
+            # 4. Configurer les permissions RBAC spécifiques
             # Permissions sur les topics
             if tenant_config.topics:
                 for topic in tenant_config.topics:
@@ -137,7 +177,7 @@ def main():
     tenant_config = TenantConfig(
         project_name="taas.cagip.factory1",
         cluster_id="lkc-xwp2kx",
-        environment_id=None,  # Optionnel
+        environment_id="env-036012",  # Ajout de l'environment_id
         topics=["topic1", "topic2"],
         consumer_groups=["group1", "group2"]
     )
