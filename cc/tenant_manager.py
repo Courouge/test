@@ -90,6 +90,74 @@ class UnifiedTenantManager:
         # Limiter la longueur à 64 caractères
         return name[:64]
 
+    def _check_existing_api_key(self, service_account_id: str, cluster_id: str) -> Optional[Dict]:
+        """
+        Vérifie si une API key existe déjà pour ce service account et cluster
+        
+        Args:
+            service_account_id: ID du service account
+            cluster_id: ID du cluster
+            
+        Returns:
+            Dict contenant l'API key existante ou None
+        """
+        try:
+            import requests
+            from requests.auth import HTTPBasicAuth
+            
+            response = requests.get(
+                "https://api.confluent.cloud/iam/v2/api-keys",
+                auth=HTTPBasicAuth(self.config.api_key, self.config.api_secret),
+                headers={'Accept': 'application/json'},
+                params={'owner': service_account_id}
+            )
+            
+            if response.status_code == 200:
+                data = response.json()
+                api_keys = data.get('data', [])
+                
+                # Chercher une API key pour ce cluster
+                for api_key in api_keys:
+                    resource = api_key.get('spec', {}).get('resource', {})
+                    if resource.get('id') == cluster_id:
+                        logger.info(f"API key existante trouvée: {api_key['id']}")
+                        return api_key
+                        
+            return None
+            
+        except Exception as e:
+            logger.warning(f"Erreur lors de la vérification des API keys: {str(e)}")
+            return None
+
+    def _check_existing_permissions(self, service_account_id: str, project_name: str) -> bool:
+        """
+        Vérifie si les permissions RBAC existent déjà pour ce tenant
+        
+        Args:
+            service_account_id: ID du service account
+            project_name: Nom du projet
+            
+        Returns:
+            True si les permissions existent déjà
+        """
+        try:
+            bindings = self.rbac_manager.list_role_bindings(
+                principal=f"User:{service_account_id}"
+            )
+            
+            # Chercher des permissions avec le préfixe du projet
+            for binding in bindings:
+                crn = binding.get('crn_pattern', '')
+                if project_name in crn:
+                    logger.info(f"Permissions existantes trouvées pour {project_name}")
+                    return True
+                    
+            return False
+            
+        except Exception as e:
+            logger.warning(f"Erreur lors de la vérification des permissions: {str(e)}")
+            return False
+
     def _get_or_create_service_account(self, project_name: str) -> Dict:
         """
         Récupère un service account existant ou en crée un nouveau
@@ -107,15 +175,25 @@ class UnifiedTenantManager:
         # Essayer de trouver un service account existant
         existing_sa = self.api.get_service_account_by_name(sa_name)
         if existing_sa:
-            logger.info(f"Service account existant trouvé pour {sa_name}")
+            logger.info(f"✅ Service account existant trouvé: {existing_sa['id']}")
             return existing_sa
 
         # Si aucun service account n'existe, en créer un nouveau
-        logger.info(f"Création d'un nouveau service account pour {sa_name}")
-        return self.api.create_service_account(
-            name=sa_name,
-            description=f"Service account pour le tenant {project_name}"
-        )
+        try:
+            logger.info(f"Création d'un nouveau service account pour {sa_name}")
+            return self.api.create_service_account(
+                name=sa_name,
+                description=f"Service account pour le tenant {project_name}"
+            )
+        except Exception as e:
+            # Si erreur 409 (Conflict), essayer de le récupérer à nouveau
+            if "409" in str(e) or "Conflict" in str(e):
+                logger.warning(f"Service account {sa_name} semble exister (conflit 409), tentative de récupération...")
+                existing_sa = self.api.get_service_account_by_name(sa_name)
+                if existing_sa:
+                    logger.info(f"✅ Service account récupéré après conflit: {existing_sa['id']}")
+                    return existing_sa
+            raise
 
     def _setup_tenant_permissions(self, service_account_id: str, project_name: str, cluster_id: str, environment_id: str = None):
         """
@@ -128,6 +206,11 @@ class UnifiedTenantManager:
             cluster_id: ID du cluster
             environment_id: ID de l'environnement (optionnel)
         """
+        # Vérifier si les permissions existent déjà
+        if self._check_existing_permissions(service_account_id, project_name):
+            logger.info(f"✅ Permissions RBAC déjà configurées pour {project_name}, ignoré")
+            return
+
         try:
             org_id = self.organization_id
             
@@ -196,6 +279,7 @@ class UnifiedTenantManager:
     def create_tenant_with_rbac(self, tenant_config: TenantConfig) -> Dict:
         """
         Crée un tenant et configure ses permissions RBAC avec isolation
+        Gère intelligemment les ressources existantes
         
         Args:
             tenant_config: Configuration du tenant
@@ -213,9 +297,20 @@ class UnifiedTenantManager:
             service_account_id = service_account['id']
             logger.info(f"Service account ID: {service_account_id}")
 
-            # 2. Créer l'API key pour le cluster
-            api_key_response = self.api.create_api_key(service_account_id, tenant_config.cluster_id)
-            logger.info(f"API Key créée: {api_key_response['id']}")
+            # 2. Vérifier s'il existe une API key pour ce cluster
+            existing_api_key = self._check_existing_api_key(service_account_id, tenant_config.cluster_id)
+            
+            if existing_api_key:
+                logger.info(f"✅ API key existante trouvée: {existing_api_key['id']}")
+                api_key_id = existing_api_key['id']
+                api_secret = "*** EXISTANTE (non récupérable) ***"
+            else:
+                # Créer une nouvelle API key
+                logger.info("Création d'une nouvelle API key")
+                api_key_response = self.api.create_api_key(service_account_id, tenant_config.cluster_id)
+                api_key_id = api_key_response['id']
+                api_secret = api_key_response['spec']['secret']
+                logger.info(f"✅ Nouvelle API key créée: {api_key_id}")
             
             # 3. Configurer les permissions avec isolation
             self._setup_tenant_permissions(
@@ -227,9 +322,14 @@ class UnifiedTenantManager:
 
             return {
                 'service_account_id': service_account_id,
-                'api_key': api_key_response['id'],
-                'api_secret': api_key_response['spec']['secret'],
-                'prefix': f"{tenant_config.project_name}.*"
+                'api_key': api_key_id,
+                'api_secret': api_secret,
+                'prefix': f"{tenant_config.project_name}.*",
+                'existing_resources': {
+                    'service_account': service_account.get('metadata', {}).get('created_at') is not None,
+                    'api_key': existing_api_key is not None,
+                    'permissions': self._check_existing_permissions(service_account_id, tenant_config.project_name)
+                }
             }
 
         except Exception as e:
@@ -251,7 +351,7 @@ def main():
     
     # Configuration du tenant
     tenant_config = TenantConfig(
-        project_name="taas.cagip.factory1",
+        project_name="org.entity.factory1",  # Modifié pour correspondre au log
         cluster_id="lkc-xwp2kx",
         environment_id="env-036012",
         organization_id="org"  # Remplacez par votre vrai organization ID
@@ -260,8 +360,19 @@ def main():
     try:
         # Créer le tenant avec RBAC
         result = manager.create_tenant_with_rbac(tenant_config)
-        print(f"Tenant créé avec succès: {result}")
-        print(f"Le tenant peut créer des ressources avec le préfixe: {result['prefix']}")
+        print(f"\n🎉 Tenant configuré avec succès!")
+        print(f"   Service Account ID: {result['service_account_id']}")
+        print(f"   API Key: {result['api_key']}")
+        print(f"   API Secret: {result['api_secret']}")
+        print(f"   Préfixe pour les ressources: {result['prefix']}")
+        
+        # Afficher le statut des ressources
+        existing = result['existing_resources']
+        print(f"\n📊 Statut des ressources:")
+        print(f"   Service Account: {'✅ Existant' if existing['service_account'] else '🆕 Nouveau'}")
+        print(f"   API Key: {'✅ Existante' if existing['api_key'] else '🆕 Nouvelle'}")
+        print(f"   Permissions RBAC: {'✅ Existantes' if existing['permissions'] else '🆕 Nouvelles'}")
+        
     except Exception as e:
         logger.error(f"Erreur lors de l'exécution: {str(e)}")
 
