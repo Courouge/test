@@ -178,8 +178,8 @@ class UnifiedTenantManager:
             logger.info(f"Service account ID: {service_account_id}")
 
             # 2. Créer l'API key pour le cluster
-            api_key = self.api.create_api_key(service_account_id, tenant_config.cluster_id)
-            logger.info(f"API Key créée: {api_key['spec']['key']}")
+            api_key_response = self.api.create_api_key(service_account_id, tenant_config.cluster_id)
+            logger.info(f"API Key créée: {api_key_response['id']}")
             
             # 3. Configurer les permissions avec isolation
             self._setup_tenant_permissions(
@@ -191,8 +191,8 @@ class UnifiedTenantManager:
 
             return {
                 'service_account_id': service_account_id,
-                'api_key': api_key['spec']['key'],
-                'api_secret': api_key['spec']['secret'],
+                'api_key': api_key_response['id'],
+                'api_secret': api_key_response['spec']['secret'],
                 'prefix': f"{tenant_config.project_name}.*"
             }
 
